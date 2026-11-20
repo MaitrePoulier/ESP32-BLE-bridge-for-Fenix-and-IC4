@@ -5,6 +5,7 @@
 		}
 	],
 	"settings": {
+		"git.openRepositoryInParentFolders": "always",
 		"editor.inlineSuggest.edits.allowCodeShifting": "never",
 		"editor.inlineSuggest.edits.renderSideBySide": "never"
 	}
