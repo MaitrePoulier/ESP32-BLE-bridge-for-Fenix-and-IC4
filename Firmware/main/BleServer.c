@@ -1,5 +1,6 @@
 // GATT server and advertising of the "IC4 Bridge" (peripheral role)
-//   S1 Cycling Power Service (0x1818): measurement 0x2A63 (notify 1 Hz), feature 0x2A65, sensor location 0x2A5D
+//   S1 Cycling Power Service (0x1818): measurement 0x2A63 (notify 1 Hz), feature 0x2A65, sensor location 0x2A5D,
+//      control point 0x2A66 (the "calibration" of a Garmin watch: offset compensation, always 0)
 //   S3 Device Information (0x180A): manufacturer, model, firmware revision
 // The crank data (cumulative revolutions, last event time) are synthesised from the FTMS cadence.
 #include "BleServer.h"
@@ -23,11 +24,22 @@ static const char *TAG = "BleServer";
 
 // Cycling Power Measurement flags: bit5 = Crank Revolution Data Present
 #define CPM_FLAGS_CRANK_DATA     0x0020
-// Cycling Power Feature: bit3 = Crank Revolution Data Supported
+// Cycling Power Feature: bit3 = Crank Revolution Data Supported, bit9 = Offset Compensation Supported (control
+// point 0x2A66: the watch can "calibrate" the sensor; the IC4 computes the power itself, the offset is always 0)
 #define CPS_FEATURE_CRANK_DATA   0x00000008u
+#define CPS_FEATURE_OFFSET_COMP  0x00000200u
+#define CPS_FEATURES             (CPS_FEATURE_CRANK_DATA | CPS_FEATURE_OFFSET_COMP)
+
+// Cycling Power Control Point
+#define CP_OP_START_OFFSET_COMPENSATION 0x0C
+#define CP_OP_RESPONSE                  0x20
+#define CP_RESULT_SUCCESS               0x01
+#define CP_RESULT_NOT_SUPPORTED         0x02
+#define ATT_ERR_CCCD_IMPROPERLY_CONFIGURED 0xFD   // Indications not enabled by the client
 #define SENSOR_LOCATION_OTHER    0
 
 static uint16_t s_cpm_handle;          // Value handle of 0x2A63
+static uint16_t s_cp_handle;           // Value handle of 0x2A66
 
 // ============================================================================
 // FTMS data used by the 1 Hz notification (NimBLE task only)
@@ -57,8 +69,8 @@ static int gatt_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_ga
     int rc = 0;
     switch (uuid) {
         case 0x2A65: {   // Cycling Power Feature (uint32)
-            const uint8_t v[4] = {CPS_FEATURE_CRANK_DATA & 0xFF, (CPS_FEATURE_CRANK_DATA >> 8) & 0xFF,
-                                  (CPS_FEATURE_CRANK_DATA >> 16) & 0xFF, (CPS_FEATURE_CRANK_DATA >> 24) & 0xFF};
+            const uint8_t v[4] = {CPS_FEATURES & 0xFF, (CPS_FEATURES >> 8) & 0xFF,
+                                  (CPS_FEATURES >> 16) & 0xFF, (CPS_FEATURES >> 24) & 0xFF};
             rc = os_mbuf_append(ctxt->om, v, sizeof(v));
             break;
         }
@@ -85,6 +97,47 @@ static int cpm_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gat
     return BLE_ATT_ERR_READ_NOT_PERMITTED;
 }
 
+static int client_index(uint16_t conn);
+
+// Cycling Power Control Point (write + indicate). Start Offset Compensation: success with an offset of 0 (the
+// "calibration" a Garmin watch proposes for a new power sensor). Any other op code: not supported.
+static int cp_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+
+    Bridge_lock();
+    const int i = client_index(conn_handle);
+    const bool indicate = (i >= 0) && g_bridge.clients[i].cp_indicate;
+    Bridge_unlock();
+    if (!indicate) return ATT_ERR_CCCD_IMPROPERLY_CONFIGURED;
+
+    uint8_t op = 0;
+    if (OS_MBUF_PKTLEN(ctxt->om) < 1 || os_mbuf_copydata(ctxt->om, 0, 1, &op) != 0) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    // Response: 0x20, request op code, result [, parameters]
+    uint8_t rsp[5] = {CP_OP_RESPONSE, op, CP_RESULT_NOT_SUPPORTED, 0, 0};
+    uint16_t rsp_len = 3;
+    if (op == CP_OP_START_OFFSET_COMPENSATION) {
+        rsp[2] = CP_RESULT_SUCCESS;
+        rsp[3] = 0;          // Raw offset (sint16): 0
+        rsp[4] = 0;
+        rsp_len = 5;
+        Bridge_lock();
+        g_bridge.cps_calibrations++;
+        Bridge_unlock();
+        EventLog_add("Client handle %d: calibration (offset compensation) -> success, offset 0", conn_handle);
+    } else {
+        EventLog_add("Client handle %d: control point op 0x%02X not supported", conn_handle, op);
+    }
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(rsp, rsp_len);
+    if (om == NULL) return BLE_ATT_ERR_INSUFFICIENT_RES;
+    ble_gatts_indicate_custom(conn_handle, s_cp_handle, om);   // Sent after the write response
+    return 0;
+}
+
 static const struct ble_gatt_svc_def s_services[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -94,6 +147,8 @@ static const struct ble_gatt_svc_def s_services[] = {
               .val_handle = &s_cpm_handle },
             { .uuid = BLE_UUID16_DECLARE(0x2A65), .access_cb = gatt_access, .flags = BLE_GATT_CHR_F_READ },
             { .uuid = BLE_UUID16_DECLARE(0x2A5D), .access_cb = gatt_access, .flags = BLE_GATT_CHR_F_READ },
+            { .uuid = BLE_UUID16_DECLARE(0x2A66), .access_cb = cp_access,
+              .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_INDICATE, .val_handle = &s_cp_handle },
             { 0 },
         },
     },
@@ -134,6 +189,7 @@ static void client_add(uint16_t conn)
         g_bridge.clients[i].conn = conn;
         strcpy(g_bridge.clients[i].addr, addr);
         g_bridge.clients[i].cps_notify = false;
+        g_bridge.clients[i].cp_indicate = false;
         g_bridge.clients[i].encrypted = false;
     }
     Bridge_unlock();
@@ -236,6 +292,11 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                          event->subscribe.cur_notify ? "on" : "off");
                 EventLog_add("Client handle %d: power notifications %s", event->subscribe.conn_handle,
                              event->subscribe.cur_notify ? "on" : "off");
+            } else if (event->subscribe.attr_handle == s_cp_handle) {
+                Bridge_lock();
+                const int i = client_index(event->subscribe.conn_handle);
+                if (i >= 0) g_bridge.clients[i].cp_indicate = event->subscribe.cur_indicate;
+                Bridge_unlock();
             }
             return 0;
 

@@ -76,6 +76,7 @@
             uint16_t conn;
             char addr[18];
             bool cps_notify;              // Subscribed to Cycling Power Measurement
+            bool cp_indicate;             // Indications of the Cycling Power Control Point enabled
             bool encrypted;
         } clients[BRIDGE_MAX_CLIENTS];
 
@@ -86,6 +87,7 @@
         uint16_t cps_crank_revs;          // Cumulative crank revolutions (uint16, wraps)
         uint16_t cps_crank_time;          // Last crank event time (1/1024 s, wraps)
         uint32_t cps_notifications;
+        uint32_t cps_calibrations;        // Offset compensations (watch calibration) answered
     } bridge_status_t;
 
     extern bridge_status_t g_bridge;     // Only written between Bridge_lock / Bridge_unlock

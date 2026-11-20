@@ -456,6 +456,7 @@ static int bridge_status(int argc, char **argv) {
     console_row("Crank revolutions", "%u (uint16)", b.cps_crank_revs);
     console_row("Last crank event", "%u (1/1024 s, uint16)", b.cps_crank_time);
     console_row("Notifications", "%lu sent", (unsigned long)b.cps_notifications);
+    console_row("Calibrations", "%lu answered (offset compensation, offset 0)", (unsigned long)b.cps_calibrations);
     printf("\n");
     return 0;
 }
