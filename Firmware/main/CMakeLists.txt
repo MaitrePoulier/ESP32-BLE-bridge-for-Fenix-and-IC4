@@ -2,15 +2,24 @@ idf_component_register(
     SRCS
         "main.cpp"
         "Batt.cpp"
+        "Ble.c"
+        "BleServer.c"
+        "Bridge.c"
+        "BridgeScreen.cpp"
         "Cellular.cpp"
         "Console.cpp"
+        "Crank.c"
         "Display.cpp"
         "ESP32.cpp"
+        "EventLog.c"
+        "Ftms.c"
+        "Ic4Client.c"
         "Lvgl_code.cpp"
         "MyWifi.cpp"
         "Touch.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
+        bt
         console
         esp_driver_gpio
         esp_driver_spi

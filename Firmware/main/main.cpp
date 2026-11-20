@@ -9,6 +9,7 @@
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "nvs_flash.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -19,6 +20,11 @@
 // Screen (ST7796S) and touch (XPT2046) drivers
 #include "Touch.h"
 
+// IC4 Bridge
+#include "Ble.h"
+#include "BridgeScreen.h"
+#include "EventLog.h"
+
 static lv_display_t * disp;
 static lv_indev_t * indev; // LVGL input device handle
 static uint8_t *buf1 = nullptr;
@@ -26,13 +32,16 @@ static uint8_t *buf2 = nullptr;
 
 
 static void setup() {
-  // NVS: saved WiFi networks
+  // NVS: saved WiFi networks, BLE bonds, PHY calibration
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());
     ret = nvs_flash_init();
   }
   ESP_ERROR_CHECK(ret);
+
+  // Event log of the bridge, kept in NVS (console: bridge log, screen: details page)
+  EventLog_init();
 
   //*************************
   // Set up the display
@@ -80,13 +89,16 @@ static void setup() {
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, my_touchpad_read);
 
-  // Test UI at boot; the LVGL benchmark is started by the console (ui benchmark)
-  create_test_ui();
+  // Diagnostic screen of the IC4 Bridge; the LVGL benchmark is started by the console (ui benchmark)
+  BridgeScreen_create();
 
   //**************************
 
   // Battery ADC: 12-bit resolution, 6 dB attenuation (optimal for ~1.25V - 1.85V input)
   batt_init();
+
+  // IC4 Bridge: NimBLE host task (core 0), GATT server and IC4 client start by themselves
+  Ble_init();
 
   // Console prepared (commands registered), opened by console_start at the end of the initialisation
   Gui_initRequests();
@@ -119,6 +131,9 @@ static void loop()
   // picolibc keeps text without '\n' in its buffer: send it now
   fflush(stdout);
 
+  // Task watchdog (CONFIG_ESP_TASK_WDT_TIMEOUT_S): restarts the board if this loop stops
+  esp_task_wdt_reset();
+
   // Give 1 ms to the other tasks of this core
   vTaskDelay(1);
 }
@@ -127,6 +142,7 @@ static void loop()
 extern "C" void app_main(void)
 {
   setup();
+  esp_task_wdt_add(NULL);   // The LVGL loop is watched by the task watchdog
   while (true) {
     loop();
   }

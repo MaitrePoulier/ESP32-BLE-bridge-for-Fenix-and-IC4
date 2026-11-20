@@ -197,6 +197,9 @@ static void wifi_driver_down(void)
 {
     if (s_sta_netif == nullptr) return;
     s_no_reconnect = true;
+    // Clean disconnection first: deinit while still associated times out ("timeout when WiFi un-init") with the
+    // BLE coexistence running
+    if (esp_wifi_disconnect() == ESP_OK) vTaskDelay(pdMS_TO_TICKS(200));
     esp_wifi_stop();
     esp_wifi_deinit();
     esp_netif_destroy_default_wifi(s_sta_netif);

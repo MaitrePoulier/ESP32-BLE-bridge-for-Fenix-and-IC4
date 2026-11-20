@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include "esp_timer.h"
+#include "esp_task_wdt.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -59,26 +60,6 @@ void my_touchpad_read(lv_indev_t * indev, lv_indev_data_t * data) {
 }
 
 
-// Simple test button event callback
-static void btn_event_cb(lv_event_t * e) {
-    // Added explicit typecast to fix the C++ conversion error
-    lv_obj_t * btn = (lv_obj_t *)lv_event_get_target(e);
-    lv_obj_t * label = lv_obj_get_child(btn, 0);
-    lv_label_set_text(label, "Clicked!");
-}
-
-// Your UI Definition Function
-void create_test_ui(void) {
-    // Create an Interactive Button to test touch functionality
-    lv_obj_t * btn = lv_button_create(lv_screen_active());
-    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t * label = lv_label_create(btn);
-    lv_label_set_text(label, "Touch Me");
-    lv_obj_center(label);
-}
-
 uint32_t my_tick(void)
 {
   return (uint32_t)(esp_timer_get_time() / 1000);
@@ -118,6 +99,7 @@ static void wait_release(void)
 {
     uint16_t x, y;
     while (touch_valid(&x, &y, TOUCH_Z_THRESHOLD / 2)) {
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -163,6 +145,7 @@ void touch_calibrate()
       uint16_t x_tmp, y_tmp;
       // Use a lower detect threshold as corners tend to be less sensitive
       while (!touch_valid(&x_tmp, &y_tmp, TOUCH_Z_THRESHOLD / 2)) {
+        esp_task_wdt_reset();   // The user may take a while: the LVGL loop is blocked meanwhile
         vTaskDelay(pdMS_TO_TICKS(1));
       }
       values[i * 2]     += x_tmp;
@@ -189,7 +172,10 @@ void touch_calibrate()
   lv_label_set_text(label, "Calibration complete!\nCalibration code sent to Serial port.");
   lv_refr_now(NULL);
 
-  vTaskDelay(pdMS_TO_TICKS(4000));
+  for (int i = 0; i < 40; i++) {   // 4 s
+    esp_task_wdt_reset();
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
 
   // Back to the previous screen
   lv_screen_load(old_scr);
@@ -244,6 +230,7 @@ static void touch_test_10s(void)
       last_x = -1;
       last_y = -1;
     }
+    esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(15));
   }
 

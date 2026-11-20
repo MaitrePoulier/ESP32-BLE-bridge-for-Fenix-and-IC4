@@ -25,6 +25,8 @@
 #include "MyWifi.h"
 #include "Batt.h"
 #include "Lvgl_code.h"
+#include "Bridge.h"
+#include "EventLog.h"
 #include "lvgl.h"
 
 // ============================================================================
@@ -364,10 +366,155 @@ static const command_t touch_cmd = {"touch", "Touch screen calibration and test.
                                     -1, nullptr};
 
 // ============================================================================
+// bridge: IC4 -> Cycling Power bridge
+// ============================================================================
+
+static void ago(char *buf, size_t size, int64_t t_us, int64_t now) {
+    if (t_us == 0) snprintf(buf, size, "never");
+    else snprintf(buf, size, "%.1f s ago", (now - t_us) / 1e6);
+}
+
+static int bridge_status(int argc, char **argv) {
+    bridge_status_t b;
+    Bridge_getStatus(&b);
+    const int64_t now = esp_timer_get_time();
+    char text[64];
+
+    console_section("IC4 (FTMS, central)");
+    if (b.ic4_state == LINK_BACKOFF) {
+        const int64_t left = b.ic4_retry_at_us - now;
+        console_row("State", "%s (next attempt in %d s, backoff %lu s)", Bridge_linkStateStr(b.ic4_state),
+                    left > 0 ? (int)((left + 999999) / 1000000) : 0, (unsigned long)(b.ic4_backoff_ms / 1000));
+    } else {
+        console_row("State", "%s", Bridge_linkStateStr(b.ic4_state));
+    }
+    console_row("Address", "%s (%d dBm when found), MTU %u", b.ic4_addr[0] ? b.ic4_addr : "--", b.ic4_rssi, b.ic4_mtu);
+    console_row("Subscriptions", "%lu since boot", (unsigned long)b.ic4_connections);
+    ago(text, sizeof(text), b.ic4_last_frame_us, now);
+    console_row("Frames", "%lu (%lu truncated), last %s", (unsigned long)b.ic4_frames, (unsigned long)b.ic4_bad_frames,
+                text);
+    if (b.ic4_raw_len > 0) {
+        char hex[3 * BRIDGE_RAW_MAX + 1] = "";
+        for (int i = 0; i < b.ic4_raw_len; i++) snprintf(hex + 3 * i, 4, "%02X ", b.ic4_raw[i]);
+        console_row("Last frame", "%s", hex);
+        const ftms_bike_data_t &d = b.ic4_data;
+        console_row("Flags", "0x%04X", d.flags);
+        if (d.speed_present)       console_row("Speed", "%.2f km/h", d.speed_kmh);
+        if (d.avg_speed_present)   console_row("Average speed", "%.2f km/h", d.avg_speed_kmh);
+        if (d.cadence_present)     console_row("Cadence", "%.1f rpm", d.cadence_rpm);
+        if (d.avg_cadence_present) console_row("Average cadence", "%.1f rpm", d.avg_cadence_rpm);
+        if (d.distance_present)    console_row("Distance", "%lu m", (unsigned long)d.distance_m);
+        if (d.resistance_present)  console_row("Resistance", "%d", d.resistance);
+        if (d.power_present)       console_row("Power", "%d W", d.power_w);
+        if (d.avg_power_present)   console_row("Average power", "%d W", d.avg_power_w);
+        if (d.energy_present)      console_row("Energy", "%u kcal (%u kcal/h, %u kcal/min)", d.energy_total_kcal,
+                                               d.energy_per_hour_kcal, d.energy_per_minute_kcal);
+        if (d.heart_rate_present)  console_row("Heart rate (IC4)", "%u bpm (not used)", d.heart_rate_bpm);
+        if (d.met_present)         console_row("MET", "%.1f", d.met);
+        if (d.elapsed_present)     console_row("Elapsed time", "%u s", d.elapsed_s);
+        if (d.remaining_present)   console_row("Remaining time", "%u s", d.remaining_s);
+    }
+
+    if (b.ic4_char_count > 0) {
+        char list[6 * BRIDGE_CHARS_MAX + 1] = "";
+        for (int i = 0; i < b.ic4_char_count; i++) snprintf(list + 5 * i, 6, "%04X ", b.ic4_chars[i]);
+        console_row("FTMS chars", "%s", list);
+    }
+    if (b.ic4_features_read) {
+        console_row("FTMS features", "0x%08lX, target 0x%08lX: resistance level %s", (unsigned long)b.ic4_features,
+                    (unsigned long)b.ic4_target_features, (b.ic4_features & (1u << 7)) ? "supported" : "NOT supported");
+    }
+    for (int k = 0; k < 2; k++) {
+        const uint8_t *raw = k ? b.ic4_training : b.ic4_status;
+        const int len = k ? b.ic4_training_len : b.ic4_status_len;
+        if (len == 0) continue;
+        char hex[3 * BRIDGE_RAW_MAX + 1] = "";
+        for (int i = 0; i < len; i++) snprintf(hex + 3 * i, 4, "%02X ", raw[i]);
+        console_row(k ? "Training status" : "Machine status", "%s(%lu received)", hex,
+                    (unsigned long)(k ? b.ic4_training_count : b.ic4_status_count));
+    }
+    if (b.seen_count == 0) console_row("Seen (scan)", "nothing advertising FTMS or named \"" IC4_NAME "\"");
+    for (int i = 0; i < b.seen_count; i++) {
+        console_row(i == 0 ? "Seen (scan)" : "", "\"%s\" %s %d dBm%s%s", b.seen[i].name, b.seen[i].addr,
+                    b.seen[i].rssi, b.seen[i].ftms ? " FTMS" : "", b.seen[i].name_ok ? " name ok" : "");
+    }
+
+    console_section("Clients (peripheral \"" BRIDGE_NAME "\")");
+    console_row("Advertising", "%s", b.advertising ? "yes" : "no");
+    console_row("Connected", "%d / %d", b.client_count, BRIDGE_MAX_CLIENTS);
+    for (int i = 0; i < b.client_count; i++) {
+        char label[16];
+        snprintf(label, sizeof(label), "Client %d", i + 1);
+        console_row(label, "%s, power notifications %s%s", b.clients[i].addr, b.clients[i].cps_notify ? "on" : "off",
+                    b.clients[i].encrypted ? ", encrypted" : "");
+    }
+
+    console_section("Cycling Power Measurement (1 Hz)");
+    console_row("FTMS data", "%s", b.cps_fresh ? "fresh" : "none for > 3 s: power 0, crank data frozen");
+    console_row("Power", "%d W", b.cps_power_w);
+    console_row("Cadence used", "%.1f rpm", b.cps_cadence_rpm);
+    console_row("Crank revolutions", "%u (uint16)", b.cps_crank_revs);
+    console_row("Last crank event", "%u (1/1024 s, uint16)", b.cps_crank_time);
+    console_row("Notifications", "%lu sent", (unsigned long)b.cps_notifications);
+    printf("\n");
+    return 0;
+}
+
+static int bridge_raw(int argc, char **argv) {
+    const bool off = (argc >= 2);
+    if (off && strcasecmp(argv[1], "off") != 0) return USAGE_ERROR;
+    g_bridge_raw_print = !off;
+    printf(off ? "bridge raw stopped\n" : "bridge raw: every Indoor Bike Data frame ('bridge raw off' to stop)\n");
+    return 0;
+}
+
+static int bridge_log(int argc, char **argv) {
+    if (argc >= 2) {
+        if (strcasecmp(argv[1], "clear") != 0) return USAGE_ERROR;
+        EventLog_clear();
+        printf("Event log cleared\n");
+        return 0;
+    }
+    static event_t events[EVENT_LOG_SIZE];
+    const int count = EventLog_copy(events, EVENT_LOG_SIZE);
+    char title[48];
+    snprintf(title, sizeof(title), "Event log (%d, current boot %u)", count, EventLog_bootNumber());
+    console_section(title);
+    for (int i = 0; i < count; i++) {
+        const event_t &e = events[i];
+        char when[32];
+        if (e.epoch != 0) {
+            const time_t t = (time_t)e.epoch;
+            struct tm local;
+            localtime_r(&t, &local);
+            strftime(when, sizeof(when), "%m-%d %H:%M:%S", &local);
+        } else {
+            snprintf(when, sizeof(when), "up %lu:%02lu:%02lu", (unsigned long)(e.uptime_s / 3600),
+                     (unsigned long)(e.uptime_s / 60 % 60), (unsigned long)(e.uptime_s % 60));
+        }
+        if (e.repeat) printf("  #%-3u %-15s %s (x%u)\n", e.boot, when, e.text, e.repeat + 1);
+        else          printf("  #%-3u %-15s %s\n", e.boot, when, e.text);
+    }
+    printf("\n");
+    return 0;
+}
+
+static const subcmd_t bridge_subs[] = {
+    {"status", "", 0, 0, &bridge_status,
+     "IC4 link and last FTMS frame decoded, clients of the bridge, Cycling Power Measurement sent."},
+    {"raw", "[off]", 0, 1, &bridge_raw, "Print every Indoor Bike Data frame (hex + decoded); off stops it."},
+    {"log", "[clear]", 0, 1, &bridge_log,
+     "Events kept in flash across restarts (connections, first FTMS frames...); clear empties it."},
+};
+static const command_t bridge_cmd = {"bridge", "IC4 Bridge: Schwinn IC4 (FTMS) to Cycling Power sensor.", bridge_subs,
+                                     COUNT_OF(bridge_subs), 0, nullptr};
+
+// ============================================================================
 // COMMAND REGISTRATION AND INTERACTIVE CONSOLE (REPL)
 // ============================================================================
 
 void register_custom_commands(void) {
+    register_command(&bridge_cmd);
     register_command(&detail_cmd);
     register_command(&restart_cmd);
     register_command(&wifi_cmd);
