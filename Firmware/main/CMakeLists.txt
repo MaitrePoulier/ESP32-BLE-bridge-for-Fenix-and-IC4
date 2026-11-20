@@ -1,0 +1,26 @@
+idf_component_register(
+    SRCS
+        "main.cpp"
+        "Batt.cpp"
+        "Cellular.cpp"
+        "Console.cpp"
+        "Display.cpp"
+        "Lvgl_code.cpp"
+        "MyWifi.cpp"
+        "s3.cpp"
+        "Touch.cpp"
+    INCLUDE_DIRS "include"
+    REQUIRES
+        esp_driver_gpio
+        esp_driver_spi
+        esp_driver_uart
+        esp_lcd
+        esp_adc
+        esp_wifi
+        esp_netif
+        esp_event
+        nvs_flash
+        efuse
+        esp_app_format
+        esp_timer
+)

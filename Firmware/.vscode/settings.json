@@ -1,6 +1,9 @@
 {
     "git.openRepositoryInParentFolders": "always",
-    "sonarlint.pathToCompileCommands": "${workspaceFolder}/compile_commands.json",
+    "idf.currentSetup": "/home/melchior/.espressif/v6.1/esp-idf",
+    "idf.flashType": "UART",
+    "sonarlint.pathToCompileCommands": "${workspaceFolder}/build/compile_commands.json",
     "editor.inlineSuggest.edits.allowCodeShifting": "never",
-    "editor.inlineSuggest.edits.renderSideBySide": "never"
+    "editor.inlineSuggest.edits.renderSideBySide": "never",
+    "idf.port": "/dev/ttyUSB0"
 }

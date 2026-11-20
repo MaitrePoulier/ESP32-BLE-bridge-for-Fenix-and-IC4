@@ -25,4 +25,8 @@
 
     float getBatteryPercentage(float);
 
+    // ADC on BattPin (was analogSetWidth / analogSetPinAttenuation / analogReadMilliVolts)
+    void  batt_init(void);
+    float battRead(void);   // Battery voltage in V
+
 #endif

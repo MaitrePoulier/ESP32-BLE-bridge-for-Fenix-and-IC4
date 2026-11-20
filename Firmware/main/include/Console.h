@@ -25,6 +25,10 @@
     // Retourne l'index dans le tableau console_t, ou -1 si rien n'est trouvé
     command_t console_getInput(char input_char, char * argument, const console_t * console,int * cmd_index);
 
+    // UART console (replaces Arduino Serial)
+    void console_init(void);
+    int  console_read(uint32_t timeout_ms);   // returns the character, or -1 if nothing received
+
     void console_displayHistory(void);
     void console_displayIntro(void);
     void console_displayHelp(console_t * );
