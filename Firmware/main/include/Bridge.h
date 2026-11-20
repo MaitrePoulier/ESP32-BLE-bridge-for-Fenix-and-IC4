@@ -34,6 +34,9 @@
         int8_t ic4_rssi;
         uint16_t ic4_mtu;
         uint32_t ic4_connections;         // Successful subscriptions since boot
+        bool ic4_shared;                  // Link opened by the IC4 console (to our heart rate), FTMS read over it
+        bool ic4_hr_client;               // The IC4 console uses our heart rate (NVS): grace period at its wake-up
+        bool ic4_grace;                   // LINK_BACKOFF: IC4 seen, waiting for its console to connect first
         uint32_t ic4_frames;
         uint32_t ic4_bad_frames;          // Shorter than their flags announce
         int64_t ic4_last_frame_us;        // 0: no frame yet
@@ -65,7 +68,23 @@
             bool logged;                  // Already in the event log
         } seen[BRIDGE_SEEN_MAX];
 
-        // Heart rate (phase 2: HRM 600 or the watch). The IC4 only receives the heart rate: never taken from it.
+        // HRM 600 (central, Heart Rate 0x180D)
+        link_state_t hrm_state;
+        int64_t hrm_retry_at_us;          // LINK_BACKOFF: time of the next attempt
+        uint32_t hrm_backoff_ms;
+        char hrm_addr[18];                // Strap connected (or being connected)
+        char hrm_name[20];
+        int8_t hrm_rssi;
+        bool hrm_saved;                   // Address saved in NVS: only this strap is used
+        char hrm_saved_addr[18];
+        bool hrm_encrypted;
+        bool hrm_secure_mode;             // The strap wants an authenticated link and refuses the pairing: it is in
+                                          // its "secure" connection type (press its button twice: "open" type)
+        int8_t hrm_battery;               // %, -1: unknown
+        uint32_t hrm_connections;         // Successful subscriptions since boot
+        uint32_t hrm_frames;
+
+        // Heart rate (HRM 600). The IC4 only receives the heart rate: never taken from it.
         uint8_t hr_bpm;
         int64_t hr_last_us;               // 0: never
 
@@ -77,16 +96,25 @@
             char addr[18];
             bool cps_notify;              // Subscribed to Cycling Power Measurement
             bool cp_indicate;             // Indications of the Cycling Power Control Point enabled
+            bool csc_notify;              // Subscribed to CSC Measurement (speed sensor)
+            bool sc_indicate;             // Indications of the SC Control Point enabled
+            bool hrs_notify;              // Subscribed to Heart Rate Measurement (IC4 console)
             bool encrypted;
         } clients[BRIDGE_MAX_CLIENTS];
 
-        // Cycling Power Measurement sent (1 Hz)
+        // Cycling Power Measurement and CSC Measurement sent (1 Hz)
         bool cps_fresh;                   // FTMS data younger than FTMS_TIMEOUT_MS
         int16_t cps_power_w;
         float cps_cadence_rpm;            // Cadence used for the crank synthesis
         uint16_t cps_crank_revs;          // Cumulative crank revolutions (uint16, wraps)
         uint16_t cps_crank_time;          // Last crank event time (1/1024 s, wraps)
+        float cps_speed_kmh;              // Speed used for the wheel synthesis
+        uint32_t cps_wheel_revs;          // Cumulative wheel revolutions (uint32)
+        uint16_t cps_wheel_time;          // Last wheel event time (1/2048 s, wraps)
         uint32_t cps_notifications;
+        uint32_t csc_notifications;
+        uint32_t hrs_notifications;       // Heart rate values relayed (one per value received from the HRM)
+        float distance_km;                // Integrated from the IC4 speed (DISTANCE_RESET_IDLE_MS)
         uint32_t cps_calibrations;        // Offset compensations (watch calibration) answered
     } bridge_status_t;
 

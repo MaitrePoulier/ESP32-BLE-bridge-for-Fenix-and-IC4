@@ -106,10 +106,10 @@ static void test_crank_change_and_zero(void)
     const uint16_t revs = c.revs, time = c.time;
     Crank_setCadence(&c, 4700000, 0.0f);           // fraction 0.7 at 4.6 s, +0.2 -> 0.9, then stopped
     Crank_advance(&c, 20000000);
-    CHECK(c.revs == revs + 0 && c.time == time, "cadence 0: frozen (revs %u time %u)", c.revs, c.time);
+    CHECK(c.revs == revs && c.time == time, "cadence 0: frozen (revs %u time %u)", c.revs, c.time);
     Crank_setCadence(&c, 21000000, 60.0f);         // Restart: fraction 0.9 kept, next revolution at +0.1 s
     Crank_advance(&c, 21700000);
-    CHECK(c.revs == revs + 1 && c.time == ticks1024(21.1), "restart: revs %u time %u expected %u", c.revs, c.time,
+    CHECK(c.revs == revs + 1u && c.time == ticks1024(21.1), "restart: revs %u time %u expected %u", c.revs, c.time,
           ticks1024(21.1));
 }
 
@@ -129,11 +129,25 @@ static void test_crank_wrap(void)
     crank_t c = {0};
     c.revs = 65534;
     Crank_setCadence(&c, 1000000, 120.0f);         // 2 rev/s
-    Crank_advance(&c, 3000000);                    // 4 revolutions: 65534 + 4 = 2 (uint16)
-    CHECK(c.revs == 2, "revs wrap %u", c.revs);
+    Crank_advance(&c, 3000000);                    // 4 revolutions: 65534 + 4 = 2 (uint16, as sent)
+    CHECK((uint16_t)c.revs == 2, "revs wrap %u", (unsigned)(uint16_t)c.revs);
     // Event time after 64 s wraps (1/1024 s on 16 bits)
     Crank_advance(&c, 70000000);
     CHECK(c.time == ticks1024(70.0) && c.time < 65536, "time wrap %u expected %u", c.time, ticks1024(70.0));
+}
+
+// Wheel: 30 km/h with a 2096 mm wheel = 3.976 rev/s; time in 1/2048 s
+static void test_wheel(void)
+{
+    crank_t w = {0};
+    w.ticks_per_s = 2048;
+    const float rpm = 30.0f / 3.6f / 2.096f * 60.0f;
+    Crank_setCadence(&w, 1000000, rpm);
+    Crank_advance(&w, 11000000);                   // 10 s: 39.76 revolutions -> 39, last one at 1 + 39 / 3.976 s
+    const double t = 1.0 + 39.0 / (rpm / 60.0);
+    CHECK(w.revs == 39, "wheel revs %u", (unsigned)w.revs);
+    CHECK(w.time == (uint16_t)llround(t * 2048.0), "wheel time %u expected %u", w.time,
+          (unsigned)(uint16_t)llround(t * 2048.0));
 }
 
 int main(void)
@@ -146,6 +160,7 @@ int main(void)
     test_crank_change_and_zero();
     test_crank_freeze();
     test_crank_wrap();
+    test_wheel();
     printf(failures ? "%d FAILURE(S)\n" : "All tests passed\n", failures);
     return failures != 0;
 }

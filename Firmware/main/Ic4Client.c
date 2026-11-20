@@ -1,6 +1,10 @@
 // C1: client of the Schwinn IC4 (central role)
 // Scan "IC Bike" + FTMS (0x1826) -> connect -> MTU -> FTMS service -> Indoor Bike Data (0x2AD2) -> its CCCD ->
 // notifications. Any failure or disconnection: new attempt after a backoff of 1 s, 2 s, 4 s... 30 s max.
+// The bike and its console are one chip with one address, and NimBLE allows one link per peer: when the IC4 console
+// connects to the bridge (to get the heart rate), that link is "shared": the FTMS data are read over it. Once the
+// console has used our heart rate (NVS), the bridge waits IC4_HR_GRACE_MS when the IC4 wakes up before connecting
+// itself, so that the console can connect first.
 // Everything runs in the NimBLE host task: the GATT server is never blocked.
 #include "Ic4Client.h"
 #include "Ble.h"
@@ -14,6 +18,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "host/ble_hs.h"
 #include "nimble/nimble_port.h"
 
@@ -51,6 +56,15 @@ static int64_t s_last_data_us;                 // Subscription or last frame
 static uint32_t s_conn_frames;                 // Frames of the current connection (the first ones are logged)
 static uint16_t s_last_flags;                  // Flags of the last frame (a change is logged)
 
+// Link shared with the IC4 console, IC4 known from a previous connection (NVS "ic4")
+static bool s_shared = false;                  // s_conn was opened by the IC4 console
+static bool s_known = false;                   // s_known_addr: address of the IC4
+static ble_addr_t s_known_addr;
+static bool s_hr_client = true;                // The IC4 console uses our heart rate: grace period at wake-up
+                                               // (default: the console must be able to connect a first time)
+static int64_t s_first_seen_us = 0;            // First advertising seen since the link was lost (grace period)
+#define NVS_NAMESPACE "ic4"
+
 // Scan candidates: the name and the FTMS UUID may come in the advertising data or in the scan response
 #define CANDIDATES 8
 static struct { ble_addr_t addr; bool name_ok, ftms_ok; char name[20]; } s_cand[CANDIDATES];
@@ -58,6 +72,7 @@ static int s_cand_next = 0;
 
 static int gap_event(struct ble_gap_event *event, void *arg);
 static void scan(void);
+static void start_link(uint16_t conn);
 
 static void set_state(link_state_t state)
 {
@@ -85,7 +100,49 @@ static void schedule_retry(void)
 
 static void retry_cb(struct ble_npl_event *ev)
 {
-    scan();
+    if (s_conn == BLE_HS_CONN_HANDLE_NONE) scan();
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// IC4 address and "console uses our heart rate" flag, kept in NVS
+// ---------------------------------------------------------------------------------------------------------------
+
+static void nvs_load(void)
+{
+    nvs_handle_t h;
+    Bridge_lock();
+    g_bridge.ic4_hr_client = s_hr_client;
+    Bridge_unlock();
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    size_t len = sizeof(s_known_addr);
+    s_known = nvs_get_blob(h, "addr", &s_known_addr, &len) == ESP_OK && len == sizeof(s_known_addr);
+    uint8_t hr = 1;
+    nvs_get_u8(h, "hr", &hr);   // Not saved yet: grace period
+    s_hr_client = (hr != 0);
+    nvs_close(h);
+    Bridge_lock();
+    g_bridge.ic4_hr_client = s_hr_client;
+    Bridge_unlock();
+}
+
+static void nvs_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+    if (s_known) nvs_set_blob(h, "addr", &s_known_addr, sizeof(s_known_addr));
+    nvs_set_u8(h, "hr", s_hr_client);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void remember_ic4(uint16_t conn)
+{
+    struct ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(conn, &desc) != 0) return;
+    if (s_known && ble_addr_cmp(&s_known_addr, &desc.peer_id_addr) == 0) return;
+    s_known = true;
+    s_known_addr = desc.peer_id_addr;
+    nvs_save();
 }
 
 // Failure while connected: disconnect, the DISCONNECT event schedules the retry
@@ -102,19 +159,28 @@ static void fail(const char *step, int status)
 
 static void scan(void)
 {
+    // The HRM client is scanning or connecting: try again shortly (not a failure, no backoff)
+    if (!Ble_centralAcquire(BLE_CENTRAL_IC4)) {
+        Ble_calloutStart(&s_retry_timer, BLE_CENTRAL_BUSY_RETRY_MS);
+        return;
+    }
     memset(s_cand, 0, sizeof(s_cand));
     s_cand_next = 0;
 
     struct ble_gap_disc_params params = {0};
     params.passive = 0;               // Active: the scan response may hold the name
     params.filter_duplicates = 0;
-    int rc = ble_gap_disc(g_own_addr_type, IC4_SCAN_TIMEOUT_MS, &params, gap_event, NULL);
+    int rc = ble_gap_disc(g_central_addr_type, IC4_SCAN_TIMEOUT_MS, &params, gap_event, NULL);
     if (rc != 0) {
         ESP_LOGW(TAG, "ble_gap_disc: %d", rc);
+        Ble_centralRelease(BLE_CENTRAL_IC4);
         schedule_retry();
         return;
     }
-    set_state(LINK_SCANNING);
+    Bridge_lock();
+    g_bridge.ic4_state = LINK_SCANNING;
+    g_bridge.ic4_grace = false;
+    Bridge_unlock();
 }
 
 // Devices that look like the IC4 (FTMS service or name): kept for the diagnostic, logged at the end of the scan
@@ -212,9 +278,10 @@ static void ic4_connect(const struct ble_gap_disc_desc *disc)
     ESP_LOGI(TAG, "IC4 found: %s (%d dBm), connecting", addr, disc->rssi);
     EventLog_add("IC4 found %s %d dBm, connecting", addr, disc->rssi);
 
-    int rc = ble_gap_connect(g_own_addr_type, &disc->addr, IC4_CONNECT_TIMEOUT_MS, NULL, gap_event, NULL);
+    int rc = ble_gap_connect(g_central_addr_type, &disc->addr, IC4_CONNECT_TIMEOUT_MS, NULL, gap_event, NULL);
     if (rc != 0) {
         ESP_LOGW(TAG, "ble_gap_connect: %d", rc);
+        Ble_centralRelease(BLE_CENTRAL_IC4);
         schedule_retry();
         return;
     }
@@ -286,6 +353,7 @@ static int on_cccd_written(uint16_t conn, const struct ble_gatt_error *error, st
         g_bridge.ic4_state = LINK_READY;
         g_bridge.ic4_connections++;
         Bridge_unlock();
+        remember_ic4(conn);   // Its address: recognised when its console connects to the bridge
         s_last_data_us = esp_timer_get_time();
         s_conn_frames = 0;
         ESP_LOGI(TAG, "Subscribed to Indoor Bike Data");
@@ -453,7 +521,8 @@ static void on_indoor_bike_data(struct os_mbuf *om)
     if (ok) {
         s_had_data = true;
         s_last_data_us = now;
-        Cps_onFtmsData(now, d.power_present, d.power_w, d.cadence_present, d.cadence_rpm);
+        Cps_onFtmsData(now, d.power_present, d.power_w, d.cadence_present, d.cadence_rpm, d.speed_present,
+                       d.speed_kmh);
     }
     if (g_bridge_raw_print) print_frame(data, len, &d, ok);
 }
@@ -477,7 +546,12 @@ static void on_diagnostic(bool status, struct os_mbuf *om)
     Bridge_unlock();
     char hex[3 * 16 + 1] = "";
     for (int i = 0; i < len && i < 16; i++) snprintf(hex + 3 * i, 4, "%02X ", data[i]);
-    EventLog_add("%s %s", status ? "Machine status" : "Training status", hex);
+    // Logged only when it changes: the IC4 sends both several times per second (they would fill the log)
+    static char last[2][3 * 16 + 1];
+    if (strcmp(last[status], hex) != 0) {
+        strcpy(last[status], hex);
+        EventLog_add("%s %s", status ? "Machine status" : "Training status", hex);
+    }
     if (g_bridge_raw_print) printf("%s [%s]\n", status ? "Machine status 2ADA" : "Training status 2AD3", hex);
 }
 
@@ -485,15 +559,59 @@ static void on_diagnostic(bool status, struct os_mbuf *om)
 // GAP events of the scan and of the IC4 connection
 // ---------------------------------------------------------------------------------------------------------------
 
+// Link up (ours, or the one of the console): MTU, then the FTMS discovery
+static void start_link(uint16_t conn)
+{
+    s_conn = conn;
+    s_first_seen_us = 0;
+    s_svc_start = s_svc_end = s_ibd_handle = s_cp_handle = s_cccd_handle = 0;
+    s_status_handle = s_training_handle = 0;
+    s_chr_count = 0;
+    Bridge_lock();
+    g_bridge.ic4_char_count = 0;
+    g_bridge.ic4_shared = s_shared;
+    g_bridge.ic4_grace = false;
+    Bridge_unlock();
+    set_state(LINK_DISCOVERING);
+    ESP_LOGI(TAG, "Connected to the IC4 (handle %d%s)", s_conn, s_shared ? ", console link" : "");
+    if (ble_gattc_exchange_mtu(s_conn, on_mtu, NULL) != 0) {
+        on_mtu(s_conn, &(struct ble_gatt_error){ .status = BLE_HS_EUNKNOWN }, 23, NULL);
+    }
+}
+
 static int gap_event(struct ble_gap_event *event, void *arg)
 {
     switch (event->type) {
         case BLE_GAP_EVENT_DISC:
-            if (adv_matches(&event->disc)) ic4_connect(&event->disc);
+            if (!adv_matches(&event->disc)) return 0;
+            if (s_hr_client) {
+                // Its console uses our heart rate: it gets IC4_HR_GRACE_MS to connect to the bridge first
+                const int64_t now = esp_timer_get_time();
+                if (s_first_seen_us == 0) {
+                    s_first_seen_us = now;
+                    EventLog_add("IC4 seen: %d s for its console to connect (heart rate)", IC4_HR_GRACE_MS / 1000);
+                }
+                const int64_t left_ms = IC4_HR_GRACE_MS - (now - s_first_seen_us) / 1000;
+                if (left_ms > 0) {
+                    ble_gap_disc_cancel();
+                    Ble_centralRelease(BLE_CENTRAL_IC4);
+                    seen_log_new();
+                    Bridge_lock();
+                    g_bridge.ic4_state = LINK_BACKOFF;
+                    g_bridge.ic4_grace = true;
+                    g_bridge.ic4_backoff_ms = (uint32_t)left_ms;
+                    g_bridge.ic4_retry_at_us = now + left_ms * 1000;
+                    Bridge_unlock();
+                    Ble_calloutStart(&s_retry_timer, (uint32_t)left_ms + 100);
+                    return 0;
+                }
+            }
+            ic4_connect(&event->disc);
             return 0;
 
         case BLE_GAP_EVENT_DISC_COMPLETE:
             // Scan timeout without finding the IC4 (a cancel for the connection does not send this event)
+            Ble_centralRelease(BLE_CENTRAL_IC4);
             if (s_conn == BLE_HS_CONN_HANDLE_NONE) {
                 Bridge_lock();
                 const bool scanning = (g_bridge.ic4_state == LINK_SCANNING);
@@ -508,31 +626,28 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             return 0;
 
         case BLE_GAP_EVENT_CONNECT:
+            Ble_centralRelease(BLE_CENTRAL_IC4);   // Connection established or failed: the HRM may scan
+            if (s_shared) return 0;                 // Our attempt, cancelled: the console opened the link
             if (event->connect.status != 0) {
                 ESP_LOGW(TAG, "Connection failed (%d)", event->connect.status);
                 EventLog_add("IC4 connection failed (%d)", event->connect.status);
                 schedule_retry();
                 return 0;
             }
-            s_conn = event->connect.conn_handle;
-            s_svc_start = s_svc_end = s_ibd_handle = s_cp_handle = s_cccd_handle = 0;
-            s_status_handle = s_training_handle = 0;
-            s_chr_count = 0;
-            Bridge_lock();
-            g_bridge.ic4_char_count = 0;
-            Bridge_unlock();
-            set_state(LINK_DISCOVERING);
-            ESP_LOGI(TAG, "Connected to the IC4 (handle %d)", s_conn);
-            if (ble_gattc_exchange_mtu(s_conn, on_mtu, NULL) != 0) {
-                on_mtu(s_conn, &(struct ble_gatt_error){ .status = BLE_HS_EUNKNOWN }, 23, NULL);
-            }
+            start_link(event->connect.conn_handle);
             return 0;
 
         case BLE_GAP_EVENT_DISCONNECT:
+            if (event->disconnect.conn.conn_handle != s_conn) return 0;
             ESP_LOGW(TAG, "IC4 disconnected (reason 0x%03X)", event->disconnect.reason);
-            EventLog_add("IC4 disconnected (reason 0x%03X, %lu frames)", event->disconnect.reason,
-                         (unsigned long)s_conn_frames);
+            EventLog_add("IC4 disconnected (reason 0x%03X, %lu frames%s)", event->disconnect.reason,
+                         (unsigned long)s_conn_frames, s_shared ? ", console link" : "");
             s_conn = BLE_HS_CONN_HANDLE_NONE;
+            s_shared = false;
+            s_first_seen_us = 0;
+            Bridge_lock();
+            g_bridge.ic4_shared = false;
+            Bridge_unlock();
             schedule_retry();
             return 0;
 
@@ -565,6 +680,63 @@ static void watch_cb(struct ble_npl_event *ev)
     Ble_calloutStart(&s_watch_timer, 1000);
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Link opened by the IC4 console (BleServer.c forwards its events)
+// ---------------------------------------------------------------------------------------------------------------
+
+static bool is_ic4(const ble_addr_t *peer)
+{
+    if (s_known && ble_addr_cmp(peer, &s_known_addr) == 0) return true;
+    // Not known yet (first use): the address found by the scan
+    char addr[18];
+    Ble_addrToStr(peer, addr);
+    Bridge_lock();
+    const bool same = (strcmp(addr, g_bridge.ic4_addr) == 0);
+    Bridge_unlock();
+    return same;
+}
+
+void Ic4_onClientConnected(uint16_t conn, const ble_addr_t *peer)
+{
+    if (!is_ic4(peer) || s_conn != BLE_HS_CONN_HANDLE_NONE) return;
+    ble_npl_callout_stop(&s_retry_timer);
+    Bridge_lock();
+    const link_state_t state = g_bridge.ic4_state;
+    Bridge_unlock();
+    if (state == LINK_SCANNING) {
+        ble_gap_disc_cancel();
+        Ble_centralRelease(BLE_CENTRAL_IC4);
+    } else if (state == LINK_CONNECTING) {
+        ble_gap_conn_cancel();   // Its CONNECT event (cancelled) releases the central role
+    }
+    s_shared = true;
+    EventLog_add("IC4 console connected to the bridge: FTMS read over its link");
+    start_link(conn);
+}
+
+bool Ic4_isSharedLink(uint16_t conn)
+{
+    return s_shared && conn == s_conn && conn != BLE_HS_CONN_HANDLE_NONE;
+}
+
+void Ic4_sharedLinkEvent(struct ble_gap_event *event)
+{
+    gap_event(event, NULL);
+}
+
+void Ic4_onHeartRateClient(uint16_t conn)
+{
+    if (!Ic4_isSharedLink(conn)) return;
+    if (s_hr_client) { remember_ic4(conn); return; }
+    s_hr_client = true;
+    remember_ic4(conn);
+    nvs_save();
+    Bridge_lock();
+    g_bridge.ic4_hr_client = true;
+    Bridge_unlock();
+    EventLog_add("IC4 console uses the heart rate: it connects first from now on");
+}
+
 void Ic4_init(void)
 {
     ble_npl_callout_init(&s_retry_timer, nimble_port_get_dflt_eventq(), retry_cb, NULL);
@@ -574,5 +746,6 @@ void Ic4_init(void)
 
 void Ic4_start(void)
 {
+    nvs_load();
     scan();
 }

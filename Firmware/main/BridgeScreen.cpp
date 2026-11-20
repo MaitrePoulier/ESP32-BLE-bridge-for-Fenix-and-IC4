@@ -1,7 +1,7 @@
 // Diagnostic screen of the IC4 Bridge (480 x 320)
-//   header : name, uptime
+//   header : name, time of day (SNTP at boot; uptime until the time is known)
 //   links  : IC4 (FTMS), Fenix (clients of the bridge), HRM 600, with a coloured dot
-//   values : power (W), cadence (rpm), resistance (IC4 level), heart rate (bpm)
+//   values : power (W), cadence (rpm), distance (km), heart rate (bpm)
 // Touching the screen shows the IC4 details page (last frame, characteristics, devices seen, event log): the
 // diagnostic is possible next to the bike, without the serial console. Touch again to come back.
 #include "BridgeScreen.h"
@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "esp_timer.h"
 #include "lvgl.h"
 
@@ -38,8 +39,8 @@ struct link_row_t { lv_obj_t *dot; lv_obj_t *state; uint32_t color; };
 struct value_tile_t { lv_obj_t *tile; lv_obj_t *title; lv_obj_t *value; lv_obj_t *unit; uint32_t bg; };
 
 static link_row_t s_ic4, s_fenix, s_hrm;
-static value_tile_t s_power, s_cadence, s_resistance, s_heart;
-static lv_obj_t *s_uptime;
+static value_tile_t s_power, s_cadence, s_distance, s_heart;
+static lv_obj_t *s_clock;
 static lv_obj_t *s_main_scr, *s_details_scr, *s_details_text;
 static uint32_t s_tick = 0;
 
@@ -154,11 +155,18 @@ static void refresh_cb(lv_timer_t *timer)
     const int64_t now = esp_timer_get_time();
     char text[96];
 
-    // Uptime
-    const uint32_t up = (uint32_t)(now / 1000000);
-    snprintf(text, sizeof(text), "%lu:%02lu:%02lu", (unsigned long)(up / 3600), (unsigned long)(up / 60 % 60),
-             (unsigned long)(up % 60));
-    set_text(s_uptime, text);
+    // Time of day (set by SNTP at boot); uptime as long as the time is not known
+    const time_t t = time(NULL);
+    if (t > 1700000000) {
+        struct tm local;
+        localtime_r(&t, &local);
+        strftime(text, sizeof(text), "%H:%M", &local);
+    } else {
+        const uint32_t up = (uint32_t)(now / 1000000);
+        snprintf(text, sizeof(text), "up %lu:%02lu:%02lu", (unsigned long)(up / 3600), (unsigned long)(up / 60 % 60),
+                 (unsigned long)(up % 60));
+    }
+    set_text(s_clock, text);
 
     // IC4
     const bool ftms_fresh = b.ic4_state == LINK_READY && b.ic4_last_frame_us != 0 &&
@@ -166,7 +174,8 @@ static void refresh_cb(lv_timer_t *timer)
     switch (b.ic4_state) {
         case LINK_READY:
             if (ftms_fresh) {
-                snprintf(text, sizeof(text), "Connected - data %.1f s ago", (now - b.ic4_last_frame_us) / 1e6);
+                snprintf(text, sizeof(text), "Connected%s - data %.1f s ago", b.ic4_shared ? " (console)" : "",
+                         (now - b.ic4_last_frame_us) / 1e6);
                 set_dot(s_ic4, COLOR_OK);
             } else {
                 snprintf(text, sizeof(text), "Connected - no data");
@@ -175,8 +184,14 @@ static void refresh_cb(lv_timer_t *timer)
             break;
         case LINK_BACKOFF: {
             const int64_t left = b.ic4_retry_at_us - now;
-            snprintf(text, sizeof(text), "Not found - retry in %d s", left > 0 ? (int)((left + 999999) / 1000000) : 0);
-            set_dot(s_ic4, COLOR_ERROR);
+            const int s = left > 0 ? (int)((left + 999999) / 1000000) : 0;
+            if (b.ic4_grace) {
+                snprintf(text, sizeof(text), "Seen - waiting for its console (%d s)", s);
+                set_dot(s_ic4, COLOR_BUSY);
+            } else {
+                snprintf(text, sizeof(text), "Not found - retry in %d s", s);
+                set_dot(s_ic4, COLOR_ERROR);
+            }
             break;
         }
         case LINK_OFF:
@@ -190,22 +205,59 @@ static void refresh_cb(lv_timer_t *timer)
     }
     set_text(s_ic4.state, text);
 
-    // Fenix: clients of the bridge, subscribed to the power notifications
-    int subscribed = 0;
-    for (int i = 0; i < b.client_count; i++) subscribed += b.clients[i].cps_notify;
+    // Fenix (and IC4 console): clients of the bridge, subscribed to the power, speed and heart rate notifications
+    int subscribed = 0, speed = 0, heart = 0;
+    for (int i = 0; i < b.client_count; i++) {
+        subscribed += b.clients[i].cps_notify;
+        speed += b.clients[i].csc_notify;
+        heart += b.clients[i].hrs_notify;
+    }
     if (b.client_count == 0) {
         snprintf(text, sizeof(text), "%s", b.advertising ? "Advertising - no client" : "Not advertising");
         set_dot(s_fenix, b.advertising ? COLOR_BUSY : COLOR_ERROR);
     } else {
-        snprintf(text, sizeof(text), "%d client(s), %d receiving power%s", b.client_count, subscribed,
-                 b.advertising ? " - advertising" : "");
+        int n = snprintf(text, sizeof(text), "%d client(s): %d power", b.client_count, subscribed);
+        if (speed > 0) n += snprintf(text + n, sizeof(text) - n, ", %d speed", speed);
+        if (heart > 0) snprintf(text + n, sizeof(text) - n, ", %d HR", heart);
         set_dot(s_fenix, subscribed > 0 ? COLOR_OK : COLOR_BUSY);
     }
     set_text(s_fenix.state, text);
 
-    // HRM 600: phase 2
-    set_text(s_hrm.state, "Not used yet (phase 2)");
-    set_dot(s_hrm, COLOR_OFF);
+    // HRM 600
+    const bool hr_valid = b.hr_last_us != 0 && b.hr_bpm > 0 && now - b.hr_last_us <= (int64_t)HR_TIMEOUT_MS * 1000;
+    switch (b.hrm_state) {
+        case LINK_READY: {
+            char battery[16] = "";
+            if (b.hrm_battery >= 0) snprintf(battery, sizeof(battery), " - battery %d%%", b.hrm_battery);
+            snprintf(text, sizeof(text), "%s%s", hr_valid ? "Connected" : "Connected - no heart rate", battery);
+            set_dot(s_hrm, hr_valid ? COLOR_OK : COLOR_BUSY);
+            break;
+        }
+        case LINK_BACKOFF: {
+            const int64_t left = b.hrm_retry_at_us - now;
+            if (b.hrm_secure_mode) {
+                snprintf(text, sizeof(text), "Secure mode: press its button 2x");
+            } else {
+                snprintf(text, sizeof(text), "Not found - retry in %d s",
+                         left > 0 ? (int)((left + 999999) / 1000000) : 0);
+            }
+            set_dot(s_hrm, COLOR_ERROR);
+            break;
+        }
+        case LINK_DISCOVERING:
+            snprintf(text, sizeof(text), "Subscribing...");
+            set_dot(s_hrm, COLOR_BUSY);
+            break;
+        case LINK_OFF:
+            snprintf(text, sizeof(text), "Off");
+            set_dot(s_hrm, COLOR_OFF);
+            break;
+        default:
+            snprintf(text, sizeof(text), "%s...", Bridge_linkStateStr(b.hrm_state));
+            set_dot(s_hrm, COLOR_BUSY);
+            break;
+    }
+    set_text(s_hrm.state, text);
 
     // Values decoded from the IC4
     if (ftms_fresh && b.ic4_data.power_present) snprintf(text, sizeof(text), "%d", b.ic4_data.power_w);
@@ -220,12 +272,12 @@ static void refresh_cb(lv_timer_t *timer)
     set_tile_bg(s_cadence, cadence_target ? GARMIN_GREEN : COLOR_PANEL);
     set_text(s_cadence.unit, cadence_target ? "rpm - target" : "rpm");
 
-    if (ftms_fresh && b.ic4_data.resistance_present) snprintf(text, sizeof(text), "%d", b.ic4_data.resistance);
-    else snprintf(text, sizeof(text), "--");
-    set_text(s_resistance.value, text);
+    // Distance of the session, from the IC4 speed (4 characters: fits the tile)
+    const float km = b.distance_km;
+    snprintf(text, sizeof(text), km < 10 ? "%.2f" : km < 100 ? "%.1f" : "%.0f", km);
+    set_text(s_distance.value, text);
 
-    // Heart rate: HRM 600 or watch (phase 2). The IC4 only receives it: its frames are never used for this tile.
-    const bool hr_valid = b.hr_last_us != 0 && b.hr_bpm > 0 && now - b.hr_last_us <= (int64_t)HR_TIMEOUT_MS * 1000;
+    // Heart rate: HRM 600. The IC4 only receives it: its frames are never used for this tile.
     if (hr_valid) {
         const int bpm = b.hr_bpm;
         snprintf(text, sizeof(text), "%d", bpm);
@@ -361,10 +413,11 @@ void BridgeScreen_create(void)
     lv_label_set_text(title, BRIDGE_NAME);
     lv_obj_set_pos(title, 12, 8);
 
-    s_uptime = lv_label_create(scr);
-    lv_obj_set_style_text_color(s_uptime, lv_color_hex(COLOR_DIM), 0);
-    lv_label_set_text(s_uptime, "");
-    lv_obj_align(s_uptime, LV_ALIGN_TOP_RIGHT, -12, 12);
+    s_clock = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_clock, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(s_clock, lv_color_hex(COLOR_TEXT), 0);
+    lv_label_set_text(s_clock, "");
+    lv_obj_align(s_clock, LV_ALIGN_TOP_RIGHT, -12, 8);
 
     s_ic4 = make_row(scr, 52, "IC4");
     s_fenix = make_row(scr, 92, "Fenix");
@@ -372,7 +425,7 @@ void BridgeScreen_create(void)
 
     s_power = make_tile(scr, TILE_GAP, "Power", "W");
     s_cadence = make_tile(scr, TILE_GAP + (TILE_W + TILE_GAP), "Cadence", "rpm");
-    s_resistance = make_tile(scr, TILE_GAP + 2 * (TILE_W + TILE_GAP), "Resistance", "level");
+    s_distance = make_tile(scr, TILE_GAP + 2 * (TILE_W + TILE_GAP), "Distance", "km");
     s_heart = make_tile(scr, TILE_GAP + 3 * (TILE_W + TILE_GAP), "Heart rate", "bpm");
 
     // Details page, shown by touching the screen

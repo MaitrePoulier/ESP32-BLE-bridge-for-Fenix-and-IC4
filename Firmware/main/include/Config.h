@@ -44,7 +44,10 @@
     #define BRIDGE_MANUFACTURER     "ESP32-Base-IC4" // Device Information (0x180A)
     #define BRIDGE_MODEL            "IC4 Bridge"
     #define BRIDGE_MAX_CLIENTS      3               // Simultaneous centrals (Fenix + IC4 console + nRF Connect)
-    #define CPS_NOTIFY_PERIOD_MS    1000            // Cycling Power Measurement: 1 Hz
+    #define CPS_NOTIFY_PERIOD_MS    1000            // Cycling Power and CSC Measurements: 1 Hz
+    // Wheel revolutions synthesised from the IC4 speed (speed and distance on the watch). The watch must use the same
+    // wheel size: Fenix, Sensors > IC4 Bridge (speed) > Wheel Size > Manual, 2096 mm.
+    #define WHEEL_CIRCUMFERENCE_MM  2096            // 700x23C
 
     // Central (client): Schwinn IC4, FTMS
     #define IC4_NAME                "IC Bike"       // Advertised name (with the FTMS service 0x1826)
@@ -52,7 +55,21 @@
     #define IC4_CONNECT_TIMEOUT_MS  10000
     #define FTMS_TIMEOUT_MS         3000            // No Indoor Bike Data: power 0, crank data frozen
     #define IC4_DATA_LOST_MS        15000           // Connected without data that long: disconnect and reconnect
-    #define HR_TIMEOUT_MS           5000            // No heart rate that long: no value (phase 2: notifications stop)
+    // The IC4 console uses the heart rate of the bridge: when the IC4 wakes up, its console gets this long to connect
+    // to the bridge first (one link only between the two: the FTMS data are then read over the console's link)
+    #define IC4_HR_GRACE_MS         15000
+    #define HR_TIMEOUT_MS           5000            // No heart rate that long: no value shown, no notification
+
+    // Central (client): Garmin HRM 600, Heart Rate 0x180D. Its address is saved in NVS at the first connection
+    // (console "hrm forget" erases it); without a saved address, the advertised name must start with one of these.
+    // Never: the IC4, a bridge, a watch broadcasting the heart rate (excluded by name, services and appearance).
+    #define HRM_NAME_PREFIXES       { "HRM 600", "HRM600" }
+    #define HRM_SCAN_TIMEOUT_MS     10000
+    #define HRM_CONNECT_TIMEOUT_MS  10000
+    #define HRM_DATA_LOST_MS        15000           // Connected without heart rate that long: disconnect and reconnect
+
+    // Distance tile: distance integrated from the IC4 speed, back to 0 after this long without pedalling
+    #define DISTANCE_RESET_IDLE_MS  (10 * 60 * 1000)
 
     // Reconnection backoff (IC4, HRM 600): 1 s, 2 s, 4 s... 30 s max
     #define BLE_BACKOFF_MIN_MS      1000

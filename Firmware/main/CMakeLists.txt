@@ -13,6 +13,7 @@ idf_component_register(
         "ESP32.cpp"
         "EventLog.c"
         "Ftms.c"
+        "HrmClient.c"
         "Ic4Client.c"
         "Lvgl_code.cpp"
         "MyWifi.cpp"

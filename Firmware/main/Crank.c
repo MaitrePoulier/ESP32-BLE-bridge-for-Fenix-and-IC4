@@ -1,4 +1,4 @@
-// Crank revolution data synthesised from the FTMS cadence (see Crank.h)
+// Crank and wheel revolution data synthesised from the FTMS cadence and speed (see Crank.h)
 #include "Crank.h"
 #include <math.h>
 
@@ -16,8 +16,9 @@ void Crank_advance(crank_t *c, int64_t now_us)
     if (complete >= 1) {
         // Time of the last complete revolution in this interval
         const double t_event = t0 + (complete - c->fraction) / rps;
-        c->revs = (uint16_t)(c->revs + (uint32_t)complete);
-        c->time = (uint16_t)((uint64_t)llround(t_event * 1024.0) & 0xFFFF);
+        const double ticks = c->ticks_per_s ? c->ticks_per_s : 1024;
+        c->revs += (uint32_t)complete;
+        c->time = (uint16_t)((uint64_t)llround(t_event * ticks) & 0xFFFF);
     }
     c->fraction = position - complete;
 }

@@ -1,9 +1,11 @@
-// NimBLE initialisation: peripheral (GATT server, advertising) and central (IC4 client) roles
+// NimBLE initialisation: peripheral (GATT server, advertising) and central (IC4 and HRM 600 clients) roles
 #include "Ble.h"
 #include "BleServer.h"
+#include "HrmClient.h"
 #include "Ic4Client.h"
 
 #include <stdio.h>
+#include <string.h>
 #include "esp_log.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -14,6 +16,21 @@
 static const char *TAG = "Ble";
 
 uint8_t g_own_addr_type = BLE_OWN_ADDR_PUBLIC;
+uint8_t g_central_addr_type = BLE_OWN_ADDR_PUBLIC;
+
+static ble_central_owner_t s_central_owner = BLE_CENTRAL_FREE;
+
+bool Ble_centralAcquire(ble_central_owner_t owner)
+{
+    if (s_central_owner != BLE_CENTRAL_FREE && s_central_owner != owner) return false;
+    s_central_owner = owner;
+    return true;
+}
+
+void Ble_centralRelease(ble_central_owner_t owner)
+{
+    if (s_central_owner == owner) s_central_owner = BLE_CENTRAL_FREE;
+}
 
 void ble_store_config_init(void);   // NimBLE: bonds kept in NVS (CONFIG_BT_NIMBLE_NVS_PERSIST)
 
@@ -42,12 +59,20 @@ static void on_sync(void)
         ESP_LOGE(TAG, "No usable BLE address (%d)", rc);
         return;
     }
+    // Always the public address (the one the Fenix bonds with)
+    uint8_t pub[6];
+    if (ble_hs_id_copy_addr(BLE_ADDR_PUBLIC, pub, NULL) == 0) g_own_addr_type = BLE_OWN_ADDR_PUBLIC;
     uint8_t addr[6] = {0};
     ble_hs_id_copy_addr(g_own_addr_type, addr, NULL);
     ESP_LOGI(TAG, "BLE address %02X:%02X:%02X:%02X:%02X:%02X", addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
 
-    BleServer_startAdvertising();   // "IC4 Bridge" (CPS)
+    // One address for both roles. (A random static address for the central role made the ESP32 controller advertise
+    // with it too: the Fenix saw an unknown second bridge.) The IC4 console and the bike share one link instead.
+    g_central_addr_type = g_own_addr_type;
+
+    BleServer_startAdvertising();   // "IC4 Bridge" (CPS, CSC, HRS)
     Ic4_start();                    // Scan for the "IC Bike"
+    Hrm_start();                    // Scan for the HRM 600 (takes turns with the IC4 scan)
 }
 
 static void host_task(void *param)
@@ -81,6 +106,7 @@ void Ble_init(void)
         return;
     }
     Ic4_init();
+    Hrm_init();
 
     ble_store_config_init();
     nimble_port_freertos_init(host_task);

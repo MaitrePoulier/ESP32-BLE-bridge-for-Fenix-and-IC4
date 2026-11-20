@@ -27,6 +27,8 @@
 #include "Lvgl_code.h"
 #include "Bridge.h"
 #include "EventLog.h"
+#include "HrmClient.h"
+#include "host/ble_store.h"
 #include "lvgl.h"
 
 // ============================================================================
@@ -389,6 +391,8 @@ static int bridge_status(int argc, char **argv) {
         console_row("State", "%s", Bridge_linkStateStr(b.ic4_state));
     }
     console_row("Address", "%s (%d dBm when found), MTU %u", b.ic4_addr[0] ? b.ic4_addr : "--", b.ic4_rssi, b.ic4_mtu);
+    console_row("Link", "%s; console uses our heart rate: %s", b.ic4_shared ? "opened by the IC4 console" : "opened by the bridge",
+                b.ic4_hr_client ? "yes: grace period at wake-up" : "no");
     console_row("Subscriptions", "%lu since boot", (unsigned long)b.ic4_connections);
     ago(text, sizeof(text), b.ic4_last_frame_us, now);
     console_row("Frames", "%lu (%lu truncated), last %s", (unsigned long)b.ic4_frames, (unsigned long)b.ic4_bad_frames,
@@ -445,17 +449,24 @@ static int bridge_status(int argc, char **argv) {
     for (int i = 0; i < b.client_count; i++) {
         char label[16];
         snprintf(label, sizeof(label), "Client %d", i + 1);
-        console_row(label, "%s, power notifications %s%s", b.clients[i].addr, b.clients[i].cps_notify ? "on" : "off",
-                    b.clients[i].encrypted ? ", encrypted" : "");
+        console_row(label, "%s, notifications: power %s, speed %s, heart rate %s%s", b.clients[i].addr,
+                    b.clients[i].cps_notify ? "on" : "off", b.clients[i].csc_notify ? "on" : "off",
+                    b.clients[i].hrs_notify ? "on" : "off", b.clients[i].encrypted ? ", encrypted" : "");
     }
 
-    console_section("Cycling Power Measurement (1 Hz)");
-    console_row("FTMS data", "%s", b.cps_fresh ? "fresh" : "none for > 3 s: power 0, crank data frozen");
+    console_section("Cycling Power and CSC Measurements (1 Hz)");
+    console_row("FTMS data", "%s", b.cps_fresh ? "fresh" : "none for > 3 s: power 0, crank and wheel data frozen");
     console_row("Power", "%d W", b.cps_power_w);
     console_row("Cadence used", "%.1f rpm", b.cps_cadence_rpm);
     console_row("Crank revolutions", "%u (uint16)", b.cps_crank_revs);
     console_row("Last crank event", "%u (1/1024 s, uint16)", b.cps_crank_time);
-    console_row("Notifications", "%lu sent", (unsigned long)b.cps_notifications);
+    console_row("Speed used", "%.2f km/h (wheel %d mm)", b.cps_speed_kmh, WHEEL_CIRCUMFERENCE_MM);
+    console_row("Wheel revolutions", "%lu (%.2f km)", (unsigned long)b.cps_wheel_revs,
+                b.cps_wheel_revs * (WHEEL_CIRCUMFERENCE_MM / 1e6));
+    console_row("Last wheel event", "%u (1/2048 s, uint16)", b.cps_wheel_time);
+    console_row("Notifications", "%lu power, %lu speed, %lu heart rate sent", (unsigned long)b.cps_notifications,
+                (unsigned long)b.csc_notifications, (unsigned long)b.hrs_notifications);
+    console_row("Distance", "%.3f km (session, from the IC4 speed)", b.distance_km);
     console_row("Calibrations", "%lu answered (offset compensation, offset 0)", (unsigned long)b.cps_calibrations);
     printf("\n");
     return 0;
@@ -500,15 +511,74 @@ static int bridge_log(int argc, char **argv) {
     return 0;
 }
 
+// Bonds kept by the bridge (Fenix...): erased, the next connection of each client pairs from scratch
+static int bridge_unpair(int argc, char **argv) {
+    const int rc = ble_store_clear();
+    printf(rc == 0 ? "Bonds erased: delete the bridge on the watch too, then pair again\n" : "ble_store_clear: %d\n", rc);
+    if (rc == 0) EventLog_add("Bonds erased (console)");
+    return 0;
+}
+
 static const subcmd_t bridge_subs[] = {
     {"status", "", 0, 0, &bridge_status,
      "IC4 link and last FTMS frame decoded, clients of the bridge, Cycling Power Measurement sent."},
     {"raw", "[off]", 0, 1, &bridge_raw, "Print every Indoor Bike Data frame (hex + decoded); off stops it."},
     {"log", "[clear]", 0, 1, &bridge_log,
      "Events kept in flash across restarts (connections, first FTMS frames...); clear empties it."},
+    {"unpair", "", 0, 0, &bridge_unpair, "Erase the bonds of the bridge (Fenix...): each client pairs again from scratch."},
 };
 static const command_t bridge_cmd = {"bridge", "IC4 Bridge: Schwinn IC4 (FTMS) to Cycling Power sensor.", bridge_subs,
                                      COUNT_OF(bridge_subs), 0, nullptr};
+
+// ============================================================================
+// hrm: HRM 600 heart rate strap
+// ============================================================================
+
+static const char *const HRM_PREFIXES[] = HRM_NAME_PREFIXES;
+
+static int hrm_status(int argc, char **argv) {
+    bridge_status_t b;
+    Bridge_getStatus(&b);
+    const int64_t now = esp_timer_get_time();
+    char text[64];
+
+    console_section("HRM 600 (Heart Rate, central)");
+    if (b.hrm_state == LINK_BACKOFF) {
+        const int64_t left = b.hrm_retry_at_us - now;
+        console_row("State", "%s (next attempt in %d s, backoff %lu s)", Bridge_linkStateStr(b.hrm_state),
+                    left > 0 ? (int)((left + 999999) / 1000000) : 0, (unsigned long)(b.hrm_backoff_ms / 1000));
+    } else {
+        console_row("State", "%s%s", Bridge_linkStateStr(b.hrm_state), b.hrm_encrypted ? ", encrypted" : "");
+    }
+    if (b.hrm_secure_mode) {
+        console_row("Problem", "strap in \"secure\" mode, refuses the bridge: press its button twice (\"open\" mode)");
+    }
+    if (b.hrm_saved) console_row("Saved strap", "%s (only this one; 'hrm forget' to change)", b.hrm_saved_addr);
+    else console_row("Saved strap", "none: the first one named \"%s\"...", HRM_PREFIXES[0]);
+    console_row("Last strap", "\"%s\" %s (%d dBm when found)", b.hrm_name, b.hrm_addr[0] ? b.hrm_addr : "--",
+                b.hrm_rssi);
+    if (b.hrm_battery >= 0) console_row("Battery", "%d %%", b.hrm_battery);
+    console_row("Subscriptions", "%lu since boot", (unsigned long)b.hrm_connections);
+    ago(text, sizeof(text), b.hr_last_us, now);
+    console_row("Heart rate", "%u bpm, last %s (%lu values)", b.hr_bpm, text, (unsigned long)b.hrm_frames);
+    console_row("Relayed", "%lu notifications to the clients", (unsigned long)b.hrs_notifications);
+    printf("\n");
+    return 0;
+}
+
+static int hrm_forget(int argc, char **argv) {
+    Hrm_forget();
+    printf("Saved strap forgotten (and its bond): the next strap named \"%s\" is used\n",
+           HRM_PREFIXES[0]);
+    return 0;
+}
+
+static const subcmd_t hrm_subs[] = {
+    {"status", "", 0, 0, &hrm_status, "Link to the strap, saved address, battery, last heart rate, values relayed."},
+    {"forget", "", 0, 0, &hrm_forget, "Forget the saved strap (and its bond): the next one named like an HRM 600 is used."},
+};
+static const command_t hrm_cmd = {"hrm", "HRM 600 heart rate strap, relayed to the IC4 console.", hrm_subs,
+                                  COUNT_OF(hrm_subs), 0, nullptr};
 
 // ============================================================================
 // COMMAND REGISTRATION AND INTERACTIVE CONSOLE (REPL)
@@ -516,6 +586,7 @@ static const command_t bridge_cmd = {"bridge", "IC4 Bridge: Schwinn IC4 (FTMS) t
 
 void register_custom_commands(void) {
     register_command(&bridge_cmd);
+    register_command(&hrm_cmd);
     register_command(&detail_cmd);
     register_command(&restart_cmd);
     register_command(&wifi_cmd);
