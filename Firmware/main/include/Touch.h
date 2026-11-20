@@ -16,6 +16,9 @@
     uint16_t touch_get_raw_z(void);
     bool     touch_valid(uint16_t *x, uint16_t *y, uint16_t threshold);
 
+    // Raw values (touch_valid) -> screen coordinates, with the calibration. Out of the screen: >= width / height.
+    void touch_raw_to_screen(uint16_t *x, uint16_t *y);
+
     // Calibrated screen coordinates. Returns false if not touched.
     bool touch_get_point(uint16_t *x, uint16_t *y, uint16_t threshold = 600);
 

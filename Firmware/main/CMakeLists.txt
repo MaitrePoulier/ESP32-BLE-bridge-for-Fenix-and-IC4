@@ -5,12 +5,13 @@ idf_component_register(
         "Cellular.cpp"
         "Console.cpp"
         "Display.cpp"
+        "ESP32.cpp"
         "Lvgl_code.cpp"
         "MyWifi.cpp"
-        "s3.cpp"
         "Touch.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
+        console
         esp_driver_gpio
         esp_driver_spi
         esp_driver_uart

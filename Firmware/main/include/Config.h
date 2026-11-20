@@ -33,6 +33,10 @@
     #define SPI_FREQUENCY        80000000
     #define SPI_TOUCH_FREQUENCY   2500000
 
+    //********************* Time of day (WiFi + SNTP) *********************
+    #define SNTP_SERVER  "pool.ntp.org"
+    #define TIMEZONE     "EST5EDT,M3.2.0,M11.1.0"
+
     //Define the random number source
     //static inline int32_t console_random(void){return rng_read();}
     inline int32_t console_random(void){return esp_random();}  //if not on STM32F753

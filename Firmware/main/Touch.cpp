@@ -92,7 +92,7 @@ bool touch_valid(uint16_t *x, uint16_t *y, uint16_t threshold)
     return true;
 }
 
-static void convert_raw_xy(uint16_t *x, uint16_t *y)
+void touch_raw_to_screen(uint16_t *x, uint16_t *y)
 {
     int32_t x_tmp = *x, y_tmp = *y, xx, yy;
 
@@ -131,7 +131,7 @@ bool touch_get_point(uint16_t *x, uint16_t *y, uint16_t threshold)
 
     s_press_time = millis() + 50;
 
-    convert_raw_xy(&x_tmp, &y_tmp);
+    touch_raw_to_screen(&x_tmp, &y_tmp);
 
     if (x_tmp >= SCREEN_WIDTH || y_tmp >= SCREEN_HEIGHT) return false;
 

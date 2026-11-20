@@ -5,8 +5,15 @@
 
 #include <stdio.h>
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+
+#include "demos/lv_demos.h"
+#include "display/lv_display_private.h"            // disp->perf_sysmon_backend (console "ui perf"); LVGL 9.6: subject is a pointer
+#include "debugging/sysmon/lv_sysmon_private.h"   // lv_sysmon_perf_info_t
 
 // Display being flushed, released by the SPI "transfer done" interrupt
 static lv_display_t * volatile flushing_disp = NULL;
@@ -187,4 +194,212 @@ void touch_calibrate()
   // Back to the previous screen
   lv_screen_load(old_scr);
   lv_obj_delete(scr);
+}
+
+
+//*********************** Touch test (console "touch test") ***********************
+
+#define TEST_DOT_SIZE  5
+#define TEST_MAX_DOTS  300   // Oldest dots deleted after that
+
+static void touch_test_10s(void)
+{
+  printf("Touch test for 10 s: touch the screen...\n");
+
+  lv_obj_t * old_scr = lv_screen_active();
+  lv_obj_t * scr = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+  lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_t * label = lv_label_create(scr);
+  lv_obj_set_style_text_color(label, lv_color_white(), 0);
+  lv_label_set_text(label, "Touch test (10 s)");
+  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
+  lv_screen_load(scr);
+  lv_refr_now(NULL);
+
+  const int64_t start = esp_timer_get_time();
+  int32_t last_x = -1, last_y = -1;
+  while (esp_timer_get_time() - start < 10LL * 1000 * 1000) {
+    uint16_t raw_x, raw_y;
+    if (touch_valid(&raw_x, &raw_y, TOUCH_Z_THRESHOLD)) {
+      uint16_t x = raw_x, y = raw_y;
+      touch_raw_to_screen(&x, &y);
+      if (x < SCREEN_WIDTH && y < SCREEN_HEIGHT && (x != last_x || y != last_y)) {
+        printf("Touch X: %u, Y: %u  (raw X: %u, Y: %u)\n", x, y, raw_x, raw_y);
+        last_x = x;
+        last_y = y;
+
+        // Red dot where the screen was touched (child 0 is the label)
+        if (lv_obj_get_child_count(scr) > TEST_MAX_DOTS) lv_obj_delete(lv_obj_get_child(scr, 1));
+        lv_obj_t * dot = lv_obj_create(scr);
+        lv_obj_remove_style_all(dot);
+        lv_obj_set_size(dot, TEST_DOT_SIZE, TEST_DOT_SIZE);
+        lv_obj_set_pos(dot, x - TEST_DOT_SIZE / 2, y - TEST_DOT_SIZE / 2);
+        lv_obj_set_style_bg_color(dot, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        lv_refr_now(NULL);
+      }
+    } else {
+      last_x = -1;
+      last_y = -1;
+    }
+    vTaskDelay(pdMS_TO_TICKS(15));
+  }
+
+  printf("Time is up\n");
+  lv_screen_load(old_scr);
+  lv_obj_delete(scr);
+}
+
+//*********************** LVGL benchmark (console "ui benchmark") ***********************
+
+static bool s_benchmark_running = false;
+
+static void benchmark_end_cb(const lv_demo_benchmark_summary_t *summary)
+{
+  printf("\n===== LVGL benchmark %d.%d.%d - %dx%d =====\n", LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR, LVGL_VERSION_PATCH,
+         SCREEN_WIDTH, SCREEN_HEIGHT);
+  printf("%-34s %5s %5s %8s %8s\n", "Scene", "FPS", "CPU%", "Render", "Flush");
+  for (const lv_demo_benchmark_scene_dsc_t *scene = summary->scenes; scene->create_cb != NULL; scene++) {
+    if (scene->measurement_cnt == 0) {
+      printf("%-34s %5s\n", scene->name, "N/A");
+      continue;
+    }
+    printf("%-34s %5lu %5lu %6lums %6lums\n", scene->name,
+           (unsigned long)(scene->fps_avg / scene->measurement_cnt),
+           (unsigned long)(scene->cpu_avg_usage / scene->measurement_cnt),
+           (unsigned long)(scene->render_avg_time / scene->measurement_cnt),
+           (unsigned long)(scene->flush_avg_time / scene->measurement_cnt));
+  }
+  // The total_avg_* are sums of the per-scene averages: divided by valid_scene_cnt
+  const int32_t n = summary->valid_scene_cnt > 0 ? summary->valid_scene_cnt : 1;
+  printf("%-34s %5ld %5ld %6ldms %6ldms   (%ld scenes)\n", "AVERAGE",
+         (long)(summary->total_avg_fps / n), (long)(summary->total_avg_cpu / n),
+         (long)(summary->total_avg_render_time / n), (long)(summary->total_avg_flush_time / n),
+         (long)summary->valid_scene_cnt);
+  printf("Benchmark done. Type 'restart' to go back to the user interface.\n");
+
+  lv_demo_benchmark_summary_display(summary);   // Summary on the screen too
+  s_benchmark_running = false;
+}
+
+static void benchmark_start(void)
+{
+  if (s_benchmark_running) {
+    printf("The benchmark is already running\n");
+    return;
+  }
+  s_benchmark_running = true;
+  printf("LVGL benchmark running (a few minutes)...\n");
+  lv_demo_benchmark_set_end_cb(benchmark_end_cb);
+  lv_demo_benchmark();
+}
+
+//*********************** UI performance (console "ui perf") ***********************
+
+static lv_observer_t *s_uiperf_observer = nullptr;
+static uint32_t s_uiperf_inv_px = 0;   // Pixels invalidated since the last line (before LVGL merges the areas)
+static uint32_t s_uiperf_frames = 0, s_uiperf_areas = 0, s_uiperf_full = 0;
+
+static void uiperf_invalidate_cb(lv_event_t *e)
+{
+  const lv_area_t *area = static_cast<const lv_area_t *>(lv_event_get_param(e));
+  if (area != NULL) s_uiperf_inv_px += lv_area_get_size(area);
+}
+
+// Start of each refresh: number of areas to redraw, and whole screen?
+static void uiperf_refr_start_cb(lv_event_t *e)
+{
+  const lv_display_t *disp = static_cast<lv_display_t *>(lv_event_get_target(e));
+  if (disp->inv_p == 0) return;
+  s_uiperf_frames++;
+  s_uiperf_areas += disp->inv_p;
+  for (uint32_t i = 0; i < disp->inv_p; i++) {
+    if (lv_area_get_width(&disp->inv_areas[i]) >= disp->hor_res &&
+        lv_area_get_height(&disp->inv_areas[i]) >= disp->ver_res) {
+      s_uiperf_full++;
+      break;
+    }
+  }
+}
+
+static void uiperf_observer_cb(lv_observer_t *observer, lv_subject_t *subject)
+{
+  const lv_sysmon_perf_info_t *info = static_cast<const lv_sysmon_perf_info_t *>(lv_subject_get_pointer(subject));
+  printf("ui perf: %2lu FPS, %3lu %% CPU, render %3lu ms, flush %2lu ms | free internal SRAM %u B (block %u)"
+         " | invalidated %lu kpx/s | %lu frames, %lu areas/frame, %lu full screen\n",
+         (unsigned long)info->calculated.fps, (unsigned long)info->calculated.cpu,
+         (unsigned long)info->calculated.render_avg_time, (unsigned long)info->calculated.flush_avg_time,
+         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+         (unsigned long)(s_uiperf_inv_px / 1000),
+         (unsigned long)s_uiperf_frames, (unsigned long)(s_uiperf_frames ? s_uiperf_areas / s_uiperf_frames : 0),
+         (unsigned long)s_uiperf_full);
+  s_uiperf_inv_px = 0;
+  s_uiperf_frames = s_uiperf_areas = s_uiperf_full = 0;
+}
+
+static void uiperf_set(bool on)
+{
+#if LV_USE_PERF_MONITOR
+  lv_display_t *disp = lv_display_get_default();
+  if (on && s_uiperf_observer == nullptr) {
+    s_uiperf_observer = lv_subject_add_observer(disp->perf_sysmon_backend.subject, uiperf_observer_cb, NULL);
+    s_uiperf_inv_px = 0;
+    lv_display_add_event_cb(disp, uiperf_invalidate_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+    lv_display_add_event_cb(disp, uiperf_refr_start_cb, LV_EVENT_REFR_START, NULL);
+  } else if (!on && s_uiperf_observer != nullptr) {
+    lv_observer_remove(s_uiperf_observer);
+    s_uiperf_observer = nullptr;
+    lv_display_remove_event_cb_with_user_data(disp, uiperf_invalidate_cb, NULL);
+    lv_display_remove_event_cb_with_user_data(disp, uiperf_refr_start_cb, NULL);
+  }
+#else
+  printf("ui perf: CONFIG_LV_USE_PERF_MONITOR disabled\n");
+#endif
+}
+
+//*********************** Requests from the console ***********************
+// LVGL is not thread-safe: the console task posts a request, the LVGL loop (app_main) runs it and gives s_done back
+
+enum gui_request_t { GUI_REQ_TOUCH_CAL, GUI_REQ_TOUCH_TEST, GUI_REQ_BENCHMARK, GUI_REQ_PERF_ON, GUI_REQ_PERF_OFF };
+
+static QueueHandle_t s_requests = NULL;
+static SemaphoreHandle_t s_done = NULL;
+
+void Gui_initRequests(void)
+{
+  s_requests = xQueueCreate(4, sizeof(int));
+  s_done = xSemaphoreCreateBinary();
+}
+
+// Waits until the LVGL loop has run the request
+static void gui_request(gui_request_t request)
+{
+  if (s_requests == NULL) return;
+  const int req = request;
+  xQueueSend(s_requests, &req, portMAX_DELAY);
+  xSemaphoreTake(s_done, portMAX_DELAY);
+}
+
+void Gui_requestTouchCalibrate(void) { gui_request(GUI_REQ_TOUCH_CAL); }
+void Gui_requestTouchTest(void)      { gui_request(GUI_REQ_TOUCH_TEST); }
+void Gui_requestBenchmark(void)      { gui_request(GUI_REQ_BENCHMARK); }
+void Gui_requestUiPerf(bool on)      { gui_request(on ? GUI_REQ_PERF_ON : GUI_REQ_PERF_OFF); }
+
+void Gui_processRequests(void)
+{
+  int req;
+  while (s_requests != NULL && xQueueReceive(s_requests, &req, 0) == pdTRUE) {
+    switch (req) {
+      case GUI_REQ_TOUCH_CAL:  touch_calibrate();   break;
+      case GUI_REQ_TOUCH_TEST: touch_test_10s();    break;
+      case GUI_REQ_BENCHMARK:  benchmark_start();   break;
+      case GUI_REQ_PERF_ON:    uiperf_set(true);    break;
+      case GUI_REQ_PERF_OFF:   uiperf_set(false);   break;
+      default: break;
+    }
+    xSemaphoreGive(s_done);
+  }
 }

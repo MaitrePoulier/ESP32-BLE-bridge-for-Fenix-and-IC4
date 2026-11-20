@@ -2,36 +2,23 @@
     #define _CONSOLE_H_
 
     #include <stdint.h>
+    #include <stddef.h>
     #include <stdio.h>
     #include "ainsi-color-codes.h"
 
-    #define FIRST_TIME 99
-
-    typedef enum Command{
-        CMD_noCommand,
-        CMD_Invalid,
-        Error
-    }command_t;
-
-    typedef void (*console_func_t)(char *arg);
-
-    typedef struct {
-        const char * parser;    // <--- Doit être un pointeur (char *)
-        const char * help;       // <--- Doit être un pointeur (char *)
-        int nb_arg;
-        console_func_t func;
-    } console_t;
-        
-    // Retourne l'index dans le tableau console_t, ou -1 si rien n'est trouvé
-    command_t console_getInput(char input_char, char * argument, const console_t * console,int * cmd_index);
-
-    // UART console (replaces Arduino Serial)
-    void console_init(void);
-    int  console_read(uint32_t timeout_ms);   // returns the character, or -1 if nothing received
-
-    void console_displayHistory(void);
+    // Serial console: esp_console + linenoise (line editing, history with the arrows, Tab completion, help)
+    // Same structure as esp32-mezz-jauges/Firmware/main/Console.cpp
+    void console_init(void);       // Registers the commands (console not opened yet)
+    void console_start(void);      // End of the initialisation: banner, then prompt
     void console_displayIntro(void);
-    void console_displayHelp(console_t * );
-    void console_test(void);
+    void register_custom_commands(void);
+
+    // Common display of the commands: coloured section title, then aligned "label  value" rows
+    void console_section(const char *title);
+    void console_row(const char *label, const char *format, ...) __attribute__((format(printf, 2, 3)));
+
+    // Copies text that comes from outside (SSID received over the air) with the control characters
+    // (ESC included: terminal escape sequences) replaced by '?'. Returns dst.
+    char *console_safe_text(char *dst, size_t size, const char *src);
 
 #endif
