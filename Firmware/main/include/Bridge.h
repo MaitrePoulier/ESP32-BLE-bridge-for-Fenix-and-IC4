@@ -34,9 +34,6 @@
         int8_t ic4_rssi;
         uint16_t ic4_mtu;
         uint32_t ic4_connections;         // Successful subscriptions since boot
-        bool ic4_shared;                  // Link opened by the IC4 console (to our heart rate), FTMS read over it
-        bool ic4_hr_client;               // The IC4 console uses our heart rate (NVS): grace period at its wake-up
-        bool ic4_grace;                   // LINK_BACKOFF: IC4 seen, waiting for its console to connect first
         uint32_t ic4_frames;
         uint32_t ic4_bad_frames;          // Shorter than their flags announce
         int64_t ic4_last_frame_us;        // 0: no frame yet

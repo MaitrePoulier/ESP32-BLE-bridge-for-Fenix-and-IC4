@@ -55,9 +55,6 @@
     #define IC4_CONNECT_TIMEOUT_MS  10000
     #define FTMS_TIMEOUT_MS         3000            // No Indoor Bike Data: power 0, crank data frozen
     #define IC4_DATA_LOST_MS        15000           // Connected without data that long: disconnect and reconnect
-    // The IC4 console uses the heart rate of the bridge: when the IC4 wakes up, its console gets this long to connect
-    // to the bridge first (one link only between the two: the FTMS data are then read over the console's link)
-    #define IC4_HR_GRACE_MS         15000
     #define HR_TIMEOUT_MS           5000            // No heart rate that long: no value shown, no notification
 
     // Central (client): Garmin HRM 600, Heart Rate 0x180D. Its address is saved in NVS at the first connection

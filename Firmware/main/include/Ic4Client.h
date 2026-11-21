@@ -13,12 +13,9 @@
     void Ic4_init(void);    // Before the NimBLE host task starts
     void Ic4_start(void);   // NimBLE task (on_sync): first scan
 
-    // Only one link between the bridge and the IC4 (same chip and address for the bike and its console). When the
-    // IC4 console connects to the bridge (heart rate), the FTMS data are read over that link. NimBLE task.
-    void Ic4_onClientConnected(uint16_t conn, const ble_addr_t *peer);   // First event of a new client
-    bool Ic4_isSharedLink(uint16_t conn);                                  // Link opened by the IC4 console
-    void Ic4_sharedLinkEvent(struct ble_gap_event *event);                // NOTIFY_RX, DISCONNECT of that link
-    void Ic4_onHeartRateClient(uint16_t conn);                            // A client subscribed to our heart rate
+    // First event of a new client (NimBLE task). The IC4 console (same chip and address as the bike) is disconnected
+    // at once: the IC4 sends no FTMS data over a link opened by its console, and only one link per peer is possible.
+    void Ic4_onClientConnected(uint16_t conn, const ble_addr_t *peer);
 
     #ifdef __cplusplus
     }

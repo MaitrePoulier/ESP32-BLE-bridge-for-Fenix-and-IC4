@@ -81,14 +81,11 @@ IC4 console.
 * The IC4 and HRM clients take turns to scan and connect (one scan or connection establishment at a time in
   NimBLE). The bridge has one address (public) for both roles: a random static address for the central role made
   the ESP32 controller advertise with it too, and the Fenix saw an unknown second bridge.
-* The IC4 bike and its console are one chip with one address, and NimBLE allows only one link per peer: when the
-  console connects to the bridge (heart rate), the bridge reads the FTMS data over that same link. When the IC4
-  wakes up, the bridge waits 15 s (`IC4_HR_GRACE_MS`) before connecting itself, so that the console can connect
-  first; screen: "Seen - waiting for its console".
-  Checked on 2026-11-21: over the link opened by the console, the IC4 sends no Indoor Bike Data (0 frames in 15 s,
-  although the subscription succeeds): after `IC4_DATA_LOST_MS` the bridge closes it and connects itself, so the
-  console loses the heart rate. The IC4 console therefore cannot show the relayed heart rate while the Fenix gets
-  the power; the heart rate is shown on the bridge screen.
+* The IC4 bike and its console are one chip with one address, and only one link per peer is possible. Over a link
+  opened by the console (to get the bridge heart rate), the IC4 sends no Indoor Bike Data (checked 2026-11-21:
+  0 frames in 15 s, although the subscription succeeds). The bridge therefore closes such a link at once and
+  connects itself: the IC4 console cannot show the relayed heart rate, which is shown on the bridge screen.
+  Remove "IC4 Bridge" from the heart rate sensor of the IC4 console.
 * Advertising data holds only Cycling Power (0x1818); Heart Rate (0x180D) and CSC (0x1816) are in the scan
   response. With 0x180D in the advertising data, the Fenix classified the bridge as a heart rate strap: it did not
   appear in the "Power" search and, added from "all sensors", it subscribed only to the heart rate.

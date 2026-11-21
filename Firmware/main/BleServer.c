@@ -388,7 +388,6 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             return 0;
 
         case BLE_GAP_EVENT_DISCONNECT:
-            if (Ic4_isSharedLink(event->disconnect.conn.conn_handle)) Ic4_sharedLinkEvent(event);
             ESP_LOGI(TAG, "Client disconnected (handle %d, reason 0x%02X)", event->disconnect.conn.conn_handle,
                      event->disconnect.reason);
             {
@@ -398,11 +397,6 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             }
             client_remove(event->disconnect.conn.conn_handle);
             BleServer_startAdvertising();
-            return 0;
-
-        case BLE_GAP_EVENT_NOTIFY_RX:
-            // Notifications received on a client link: only the IC4 console link, where the bridge reads the FTMS
-            if (Ic4_isSharedLink(event->notify_rx.conn_handle)) Ic4_sharedLinkEvent(event);
             return 0;
 
         case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -442,7 +436,6 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                 const int i = client_index(event->subscribe.conn_handle);
                 if (i >= 0) g_bridge.clients[i].hrs_notify = event->subscribe.cur_notify;
                 Bridge_unlock();
-                if (event->subscribe.cur_notify) Ic4_onHeartRateClient(event->subscribe.conn_handle);
                 ESP_LOGI(TAG, "Client handle %d: heart rate notifications %s", event->subscribe.conn_handle,
                          event->subscribe.cur_notify ? "on" : "off");
             } else if (event->subscribe.attr_handle == s_sc_handle) {

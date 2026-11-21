@@ -171,8 +171,7 @@ static void refresh_cb(lv_timer_t *timer)
     switch (b.ic4_state) {
         case LINK_READY:
             if (ftms_fresh) {
-                snprintf(text, sizeof(text), "Connected%s - data %.1f s ago", b.ic4_shared ? " (console)" : "",
-                         (now - b.ic4_last_frame_us) / 1e6);
+                snprintf(text, sizeof(text), "Connected - data %.1f s ago", (now - b.ic4_last_frame_us) / 1e6);
                 set_dot(s_ic4, COLOR_OK);
             } else {
                 snprintf(text, sizeof(text), "Connected - no data");
@@ -182,13 +181,8 @@ static void refresh_cb(lv_timer_t *timer)
         case LINK_BACKOFF: {
             const int64_t left = b.ic4_retry_at_us - now;
             const int s = left > 0 ? (int)((left + 999999) / 1000000) : 0;
-            if (b.ic4_grace) {
-                snprintf(text, sizeof(text), "Seen - waiting for its console (%d s)", s);
-                set_dot(s_ic4, COLOR_BUSY);
-            } else {
-                snprintf(text, sizeof(text), "Not found - retry in %d s", s);
-                set_dot(s_ic4, COLOR_ERROR);
-            }
+            snprintf(text, sizeof(text), "Not found - retry in %d s", s);
+            set_dot(s_ic4, COLOR_ERROR);
             break;
         }
         case LINK_OFF:

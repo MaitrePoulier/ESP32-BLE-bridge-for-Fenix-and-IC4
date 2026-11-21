@@ -391,8 +391,6 @@ static int bridge_status(int argc, char **argv) {
         console_row("State", "%s", Bridge_linkStateStr(b.ic4_state));
     }
     console_row("Address", "%s (%d dBm when found), MTU %u", b.ic4_addr[0] ? b.ic4_addr : "--", b.ic4_rssi, b.ic4_mtu);
-    console_row("Link", "%s; console uses our heart rate: %s", b.ic4_shared ? "opened by the IC4 console" : "opened by the bridge",
-                b.ic4_hr_client ? "yes: grace period at wake-up" : "no");
     console_row("Subscriptions", "%lu since boot", (unsigned long)b.ic4_connections);
     ago(text, sizeof(text), b.ic4_last_frame_us, now);
     console_row("Frames", "%lu (%lu truncated), last %s", (unsigned long)b.ic4_frames, (unsigned long)b.ic4_bad_frames,
