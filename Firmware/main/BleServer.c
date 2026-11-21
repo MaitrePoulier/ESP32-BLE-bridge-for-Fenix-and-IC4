@@ -320,7 +320,7 @@ static void client_remove(uint16_t conn)
 }
 
 // ============================================================================
-// Advertising: "IC4 Bridge", appearance 0x0484, services 0x1818 and 0x180D; scan response: 0x1816
+// Advertising: "IC4 Bridge", appearance 0x0484, service 0x1818; scan response: 0x180D and 0x1816
 // ============================================================================
 
 static int gap_event(struct ble_gap_event *event, void *arg);
@@ -333,9 +333,11 @@ void BleServer_startAdvertising(void)
     Bridge_unlock();
     if (full) return;   // Restarted at the next disconnection
 
-    // Advertising data: power (Fenix) and heart rate (IC4 console). Scan response: speed.
-    static const ble_uuid16_t adv_uuids[] = { BLE_UUID16_INIT(0x1818), BLE_UUID16_INIT(0x180D) };
-    static const ble_uuid16_t rsp_uuids[] = { BLE_UUID16_INIT(0x1816) };
+    // Advertising data: power only. A Garmin watch classifies the sensor from the advertising data: with 0x180D
+    // there, the Fenix pairs the bridge as a heart rate strap and never offers it in the "Power" search.
+    // Scan response (active scanners only): heart rate (IC4 console) and speed.
+    static const ble_uuid16_t adv_uuids[] = { BLE_UUID16_INIT(0x1818) };
+    static const ble_uuid16_t rsp_uuids[] = { BLE_UUID16_INIT(0x180D), BLE_UUID16_INIT(0x1816) };
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.name = (const uint8_t *)BRIDGE_NAME;

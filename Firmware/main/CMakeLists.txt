@@ -34,4 +34,5 @@ idf_component_register(
         efuse
         esp_app_format
         esp_timer
+        espcoredump
 )

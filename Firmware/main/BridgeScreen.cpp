@@ -1,5 +1,5 @@
 // Diagnostic screen of the IC4 Bridge (480 x 320)
-//   header : name, time of day (SNTP at boot; uptime until the time is known)
+//   header : name, time of day (SNTP at boot; empty until the time is known)
 //   links  : IC4 (FTMS), Fenix (clients of the bridge), HRM 600, with a coloured dot
 //   values : power (W), cadence (rpm), distance (km), heart rate (bpm)
 // Touching the screen shows the IC4 details page (last frame, characteristics, devices seen, event log): the
@@ -155,16 +155,13 @@ static void refresh_cb(lv_timer_t *timer)
     const int64_t now = esp_timer_get_time();
     char text[96];
 
-    // Time of day (set by SNTP at boot); uptime as long as the time is not known
+    // Time of day (set by SNTP at boot); empty as long as the time is not known
     const time_t t = time(NULL);
+    text[0] = '\0';
     if (t > 1700000000) {
         struct tm local;
         localtime_r(&t, &local);
         strftime(text, sizeof(text), "%H:%M", &local);
-    } else {
-        const uint32_t up = (uint32_t)(now / 1000000);
-        snprintf(text, sizeof(text), "up %lu:%02lu:%02lu", (unsigned long)(up / 3600), (unsigned long)(up / 60 % 60),
-                 (unsigned long)(up % 60));
     }
     set_text(s_clock, text);
 

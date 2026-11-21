@@ -85,8 +85,14 @@ IC4 console.
   console connects to the bridge (heart rate), the bridge reads the FTMS data over that same link. When the IC4
   wakes up, the bridge waits 15 s (`IC4_HR_GRACE_MS`) before connecting itself, so that the console can connect
   first; screen: "Seen - waiting for its console".
-* On the Fenix, add the bridge only as a power sensor (Sensors > Add > Power): it also advertises a heart rate
-  service (for the IC4 console), and the watch would list it a second time as a heart rate sensor.
+  Checked on 2026-11-21: over the link opened by the console, the IC4 sends no Indoor Bike Data (0 frames in 15 s,
+  although the subscription succeeds): after `IC4_DATA_LOST_MS` the bridge closes it and connects itself, so the
+  console loses the heart rate. The IC4 console therefore cannot show the relayed heart rate while the Fenix gets
+  the power; the heart rate is shown on the bridge screen.
+* Advertising data holds only Cycling Power (0x1818); Heart Rate (0x180D) and CSC (0x1816) are in the scan
+  response. With 0x180D in the advertising data, the Fenix classified the bridge as a heart rate strap: it did not
+  appear in the "Power" search and, added from "all sensors", it subscribed only to the heart rate.
+* On the Fenix, add the bridge only as a power sensor (Sensors > Add > Power).
   `bridge unpair` erases the bonds kept by the bridge.
 * Task watchdog: the board restarts if the LVGL loop or an idle task stops for 10 s.
 * Screen (Garmin style): time of day, state of each link (IC4, Fenix, HRM 600) and decoded values, refreshed 30
@@ -103,11 +109,10 @@ IC4 console.
 ### Phases
 
 1. IC4 -> Cycling Power only. Checked with the Fenix (Sensors -> Add -> Power): power, cadence, speed and distance.
-2. Relay of the HRM 600 heart rate to the IC4 console (Heart Rate Service 0x180D on the bridge). Relay checked from a
-   PC; with the IC4 console: not checked yet.
+2. HRM 600 heart rate on the bridge screen, relayed by its Heart Rate Service 0x180D (checked from a PC). The IC4
+   console connects to it, but then sends no FTMS data over that link (see above): not usable with the Fenix.
 
 ### Unknowns
 
 * Does the Fenix accept this BLE power sensor? Yes: power, cadence, and speed / distance from the wheel data.
-* Does the IC4 console reconnect by itself to the heart rate sensor, or must its button be held at each session?
 * How many simultaneous BLE connections does the HRM 600 accept?
