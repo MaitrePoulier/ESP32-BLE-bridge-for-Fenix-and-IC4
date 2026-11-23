@@ -20,12 +20,16 @@ Touching the screen shows a diagnostic page for the IC4 link.
 
 ## BaseBoard
 
-* Bluetooth legacy support for receiving audio from an external audio source
-* 2x 18650 LiFePo4 cells that can be charged with the USB connector
+* 2x 18650 LiFePo4 cells that can be charged with the USB connector: more than 5 h of use as an IC4 Bridge
 * Low noise +/- 12.4 V going to the mezzanine to power the audio op-amps
 * I2S port going to the mezzanine
 * MHS 4.0" screen (ST7796S, 480 x 320) with touch (XPT2046)
 * Fits inside a Pelican 1040 Micro Case
+
+The IC4 Bridge uses no mezzanine (no audio): the +/- 12.4 V and the I2S port are unused.
+
+The board is easy to order assembled from JLCPCB: the LCSC part numbers are in the schematic, and the production
+files (Gerber, BOM, CPL) are in `Hardware/jlcpcb/production_files/` (JLCPCB Tools plugin for KiCad).
 
 Folders: `Hardware/` (KiCad), `Enclosure/` (3D models of the case), `Datasheets/`, `Design/` (pictures of the
 README, design notes), `Firmware/`.
@@ -84,14 +88,16 @@ gcc -std=c11 -Wall -Wextra -Imain/include test/host/test_bridge.c main/Ftms.c ma
 
 ### Use
 
-1. Plug in the bridge: it finds the IC4 as soon as the bike wakes up (pedalling), and the HRM 600 as soon as it is
-   worn.
+1. The first time, hold the Bluetooth button of the IC4 for 3 s so that the bridge can pair with it. Afterwards,
+   the bridge finds the IC4 as soon as the bike wakes up (pedalling), and the HRM 600 as soon as it is worn.
 2. On the Fenix, add the bridge **only as a power sensor**: Sensors > Add > Power > IC4 Bridge. Power, cadence,
    speed and distance then come from this one sensor. If the speed is wrong, set the wheel size of the sensor to
    2096 mm (Manual).
 3. HRM 600: put it in its **open** connection type once (press its button twice quickly; LED: three green flashes
    every 5 s). The first strap named "HRM 600" / "HRM600" is saved; `hrm forget` to change.
 4. IC4 console: do not pair "IC4 Bridge" as its heart rate sensor (see below).
+5. Time of day (optional): save a WiFi network in the serial console with `wifi connect <ssid> [password]`. At each
+   boot the bridge gets the time over WiFi (SNTP), then turns the WiFi off.
 
 ### Fenix side (peripheral)
 
@@ -162,3 +168,9 @@ gcc -std=c11 -Wall -Wextra -Imain/include test/host/test_bridge.c main/Ftms.c ma
 * Not possible: heart rate on the IC4 console (see above).
 * Idea: estimate the resistance level from power and cadence, with a calibration session.
 * Unknown: how many simultaneous BLE connections the HRM 600 accepts.
+
+## License
+
+* Firmware (`Firmware/`) and documentation: [GNU GPL v3](LICENSE).
+* Hardware (`Hardware/`, KiCad) and enclosure (`Enclosure/`): [CERN-OHL-S v2](Hardware/LICENSE), strongly
+  reciprocal: modified designs must stay open under the same licence.
