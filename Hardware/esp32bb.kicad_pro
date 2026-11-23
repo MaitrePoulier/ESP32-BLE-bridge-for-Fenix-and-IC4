@@ -911,7 +911,7 @@
     "last_paths": {
       "idf": "",
       "netlist": "",
-      "plot": "",
+      "plot": "plots/",
       "specctra_dsn": "",
       "step": "../Enclosure/ESP32-Base.step",
       "vrml": ""
