@@ -43,7 +43,7 @@
     #define BRIDGE_APPEARANCE       0x0484          // Cycling: power sensor
     #define BRIDGE_MANUFACTURER     "ESP32-Base-IC4" // Device Information (0x180A)
     #define BRIDGE_MODEL            "IC4 Bridge"
-    #define BRIDGE_MAX_CLIENTS      3               // Simultaneous centrals (Fenix + IC4 console + nRF Connect)
+    #define BRIDGE_MAX_CLIENTS      3               // Simultaneous centrals (Fenix, nRF Connect...)
     #define CPS_NOTIFY_PERIOD_MS    1000            // Cycling Power and CSC Measurements: 1 Hz
     // Wheel revolutions synthesised from the IC4 speed (speed and distance on the watch). The watch must use the same
     // wheel size: Fenix, Sensors > IC4 Bridge (speed) > Wheel Size > Manual, 2096 mm.
@@ -75,9 +75,14 @@
     // Diagnostic screen refresh (30 Hz)
     #define UI_REFRESH_MS           33
 
-    // Training targets shown on the screen
-    #define CADENCE_TARGET_MIN      80              // rpm: cadence tile highlighted in [MIN, MAX]
-    #define CADENCE_TARGET_MAX      95
+    // Training zones shown on the screen gauges (each band is as wide as its span of values)
+    // Cadence zones (rpm, lower bound of each zone), same colours as the heart rate zones: Z3 (green) is the target
+    #define CADENCE_Z1_MIN          50              // Too slow
+    #define CADENCE_Z2_MIN          60              // Slow
+    #define CADENCE_Z3_MIN          80              // Target
+    #define CADENCE_Z4_MIN          95              // Fast
+    #define CADENCE_Z5_MIN          105             // Very fast
+    #define CADENCE_Z5_MAX          120
     // Heart rate zones (bpm, lower bound of each zone): Z1 92-117, Z2 118-132, Z3 133-155, Z4 156-165, Z5 166-183
     #define HR_Z1_MIN               92              // Recovery
     #define HR_Z2_MIN               118             // Base endurance

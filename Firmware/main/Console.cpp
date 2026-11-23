@@ -575,7 +575,7 @@ static const subcmd_t hrm_subs[] = {
     {"status", "", 0, 0, &hrm_status, "Link to the strap, saved address, battery, last heart rate, values relayed."},
     {"forget", "", 0, 0, &hrm_forget, "Forget the saved strap (and its bond): the next one named like an HRM 600 is used."},
 };
-static const command_t hrm_cmd = {"hrm", "HRM 600 heart rate strap, relayed to the IC4 console.", hrm_subs,
+static const command_t hrm_cmd = {"hrm", "HRM 600 heart rate strap (screen, Heart Rate service of the bridge).", hrm_subs,
                                   COUNT_OF(hrm_subs), 0, nullptr};
 
 // ============================================================================

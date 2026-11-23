@@ -1,7 +1,9 @@
-// Diagnostic screen of the IC4 Bridge (480 x 320)
-//   header : name, time of day (SNTP at boot; empty until the time is known)
-//   links  : IC4 (FTMS), Fenix (clients of the bridge), HRM 600, with a coloured dot
-//   values : power (W), cadence (rpm), distance (km), heart rate (bpm)
+// Main screen of the IC4 Bridge (480 x 320), in the style of the Garmin watches
+//   top    : state of each link (IC4, Fenix, HRM 600) with a coloured dot, time of day (empty until known)
+//   left   : heart rate gauge (HRM 600), bands of the 5 heart rate zones, zone below
+//   centre : power (W) and distance (km)
+//   right  : cadence gauge, bands of the 5 cadence zones (same colours as the heart rate, Z3 green: target)
+// Each band is as wide as its span of values (Config.h); a marker in the colour of the zone shows the value.
 // Touching the screen shows the IC4 details page (last frame, characteristics, devices seen, event log): the
 // diagnostic is possible next to the bike, without the serial console. Touch again to come back.
 #include "BridgeScreen.h"
@@ -9,40 +11,91 @@
 #include "Config.h"
 #include "EventLog.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include "esp_timer.h"
 #include "lvgl.h"
 
-// Theme in the style of the Garmin watches: black background, white figures, grey labels, and the colours of the
-// Garmin heart rate zones (approximations) for every state
-#define GARMIN_GREY    0x8C8C8C   // Zone 1
-#define GARMIN_BLUE    0x1D8FE1   // Zone 2
-#define GARMIN_GREEN   0x4FB848   // Zone 3
-#define GARMIN_ORANGE  0xF28C1E   // Zone 4
-#define GARMIN_RED     0xE2231A   // Zone 5
+// Zone colours
+#define ZONE_GREY      0xD8D4DE
+#define ZONE_BLUE      0x1E7FD6
+#define ZONE_GREEN     0x3DBE5B
+#define ZONE_ORANGE    0xF7A13A
+#define ZONE_RED       0xF0504F
 
 #define COLOR_BG       0x000000
-#define COLOR_PANEL    0x1A1A1A
+#define COLOR_LINE     0x333333
 #define COLOR_TEXT     0xFFFFFF
 #define COLOR_DIM      0x9E9E9E
-#define COLOR_OK       GARMIN_GREEN
-#define COLOR_BUSY     GARMIN_ORANGE
-#define COLOR_ERROR    GARMIN_RED
+#define COLOR_OK       ZONE_GREEN
+#define COLOR_BUSY     ZONE_ORANGE
+#define COLOR_ERROR    ZONE_RED
 #define COLOR_OFF      0x4A4A4A
 
-#define TILE_W   114      // 4 tiles of 114 px with 6 px gaps
-#define TILE_GAP 6
+// Gauges: 270 degree arc open at the bottom (LVGL angles: 0 = 3 o'clock, clockwise)
+#define GAUGE_SIZE     164
+#define GAUGE_Y        112
+#define GAUGE_MARGIN   10
+#define GAUGE_ARC_W    10
+#define GAUGE_START    135
+#define GAUGE_SWEEP    270
+#define MARKER_SIZE    22
+#define ZONE_COUNT     5
 
 struct link_row_t { lv_obj_t *dot; lv_obj_t *state; uint32_t color; };
-struct value_tile_t { lv_obj_t *tile; lv_obj_t *title; lv_obj_t *value; lv_obj_t *unit; uint32_t bg; };
+
+// Zones of a gauge: lower bound of each zone, upper bound of the last one, colour of each zone
+struct gauge_scale_t { int min[ZONE_COUNT]; int max; uint32_t color[ZONE_COUNT]; };
+static const gauge_scale_t HR_SCALE = {
+    {HR_Z1_MIN, HR_Z2_MIN, HR_Z3_MIN, HR_Z4_MIN, HR_Z5_MIN}, HR_Z5_MAX,
+    {ZONE_GREY, ZONE_BLUE, ZONE_GREEN, ZONE_ORANGE, ZONE_RED},
+};
+static const gauge_scale_t CADENCE_SCALE = {
+    {CADENCE_Z1_MIN, CADENCE_Z2_MIN, CADENCE_Z3_MIN, CADENCE_Z4_MIN, CADENCE_Z5_MIN}, CADENCE_Z5_MAX,
+    {ZONE_GREY, ZONE_BLUE, ZONE_GREEN, ZONE_ORANGE, ZONE_RED},   // Same colours as the heart rate
+};
+
+struct gauge_t {
+    const gauge_scale_t *scale;
+    int cx, cy;                 // Centre of the arc (screen coordinates)
+    lv_obj_t *marker;
+    lv_obj_t *value, *unit, *caption;
+    int marker_angle;           // -1: hidden
+    uint32_t marker_color;
+};
+
+struct value_box_t { lv_obj_t *value; };
 
 static link_row_t s_ic4, s_fenix, s_hrm;
-static value_tile_t s_power, s_cadence, s_distance, s_heart;
+static gauge_t s_hr_gauge, s_cadence_gauge;
+static value_box_t s_power, s_distance;
 static lv_obj_t *s_clock;
 static lv_obj_t *s_main_scr, *s_details_scr, *s_details_text;
 static uint32_t s_tick = 0;
+
+// Heart above the heart rate (A8: drawn in the image recolor colour)
+static const uint8_t HEART_A8[] = {
+    0x00, 0x00, 0x07, 0x80, 0xCD, 0xD4, 0xCD, 0x80, 0x0E, 0x0E, 0x80, 0xCD, 0xD4, 0xCD, 0x80, 0x07, 0x00, 0x00,
+    0x00, 0x07, 0xCD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xDC, 0xDC, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xCD, 0x07, 0x00,
+    0x00, 0x78, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x78, 0x00,
+    0x00, 0xC6, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC6, 0x00,
+    0x00, 0xD4, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xD4, 0x00,
+    0x00, 0xCD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xCD, 0x00,
+    0x00, 0x95, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x95, 0x00,
+    0x00, 0x2A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x2A, 0x00,
+    0x00, 0x00, 0x9C, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x9C, 0x00, 0x00,
+    0x00, 0x00, 0x0E, 0xDC, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xDC, 0x0E, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x2A, 0xEA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xEA, 0x2A, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x1C, 0xCD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xCD, 0x1C, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x8E, 0xFF, 0xFF, 0xFF, 0xFF, 0x8E, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x39, 0xCD, 0xCD, 0x39, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+#define HEART_W 18
+#define HEART_H 15
+static lv_image_dsc_t s_heart_dsc;
 
 static void set_text(lv_obj_t *label, const char *text)
 {
@@ -57,95 +110,174 @@ static void set_dot(link_row_t &row, uint32_t color)
     lv_obj_set_style_bg_color(row.dot, lv_color_hex(color), 0);
 }
 
-static link_row_t make_row(lv_obj_t *parent, int y, const char *name)
+static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, uint32_t color, const char *text)
+{
+    lv_obj_t *label = lv_label_create(parent);
+    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+    lv_label_set_text(label, text);
+    return label;
+}
+
+static link_row_t make_row(lv_obj_t *parent, int y, const char *name, int state_width)
 {
     link_row_t row = {};
     row.dot = lv_obj_create(parent);
     lv_obj_remove_style_all(row.dot);
     lv_obj_set_clickable(row.dot, false);
-    lv_obj_set_size(row.dot, 14, 14);
+    lv_obj_set_size(row.dot, 12, 12);
     lv_obj_set_style_radius(row.dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(row.dot, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(row.dot, lv_color_hex(COLOR_OFF), 0);
     row.color = COLOR_OFF;
-    lv_obj_set_pos(row.dot, 14, y + 4);
+    lv_obj_set_pos(row.dot, 14, y + 6);
 
-    lv_obj_t *label = lv_label_create(parent);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(label, lv_color_hex(COLOR_TEXT), 0);
-    lv_label_set_text(label, name);
-    lv_obj_set_pos(label, 38, y);
+    lv_obj_t *label = make_label(parent, &lv_font_montserrat_20, COLOR_TEXT, name);
+    lv_obj_set_pos(label, 36, y);
 
-    row.state = lv_label_create(parent);
-    lv_obj_set_style_text_font(row.state, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(row.state, lv_color_hex(COLOR_DIM), 0);
-    lv_obj_set_width(row.state, 300);
+    row.state = make_label(parent, &lv_font_montserrat_16, COLOR_DIM, "");
+    lv_obj_set_width(row.state, state_width);
     lv_label_set_long_mode(row.state, LV_LABEL_LONG_MODE_CLIP);
-    lv_label_set_text(row.state, "");
-    lv_obj_set_pos(row.state, 160, y + 3);
+    lv_obj_set_pos(row.state, 150, y + 3);
     return row;
 }
 
-static value_tile_t make_tile(lv_obj_t *parent, int x, const char *title, const char *unit)
+// Angle (degrees, LVGL) of a value on a gauge: the scale is linear from the first lower bound to the last upper bound
+static int gauge_angle(const gauge_scale_t &scale, float v)
 {
-    lv_obj_t *tile = lv_obj_create(parent);
-    lv_obj_remove_style_all(tile);
-    lv_obj_set_size(tile, TILE_W, 132);
-    lv_obj_set_pos(tile, x, 180);
-    lv_obj_set_style_radius(tile, 10, 0);
-    lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(tile, lv_color_hex(COLOR_PANEL), 0);
-    lv_obj_set_clickable(tile, false);   // The touch goes to the screen (details page)
-
-    value_tile_t tv = {};
-    tv.title = lv_label_create(tile);
-    lv_obj_set_style_text_color(tv.title, lv_color_hex(COLOR_DIM), 0);
-    lv_label_set_text(tv.title, title);
-    lv_obj_align(tv.title, LV_ALIGN_TOP_MID, 0, 8);
-
-    tv.tile = tile;
-    tv.bg = COLOR_PANEL;
-    tv.value = lv_label_create(tile);
-    lv_obj_set_style_text_font(tv.value, &lv_font_montserrat_48, 0);
-    lv_obj_set_style_text_color(tv.value, lv_color_hex(COLOR_TEXT), 0);
-    lv_label_set_text(tv.value, "--");
-    lv_obj_align(tv.value, LV_ALIGN_CENTER, 0, 4);
-
-    tv.unit = lv_label_create(tile);
-    lv_obj_set_style_text_color(tv.unit, lv_color_hex(COLOR_DIM), 0);
-    lv_label_set_text(tv.unit, unit);
-    lv_obj_align(tv.unit, LV_ALIGN_BOTTOM_MID, 0, -8);
-    return tv;
+    const float lo = (float)scale.min[0], hi = (float)scale.max;
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return GAUGE_START + (int)lroundf((v - lo) * GAUGE_SWEEP / (hi - lo));
 }
 
-// Background of a tile (highlight): only changed when needed. On a colour, the labels turn white.
-static void set_tile_bg(value_tile_t &tile, uint32_t color)
+// Zone of a value: 0..4, -1 below the first zone, ZONE_COUNT above the last one
+static int gauge_zone(const gauge_scale_t &scale, float v)
 {
-    if (tile.bg == color) return;
-    tile.bg = color;
-    lv_obj_set_style_bg_color(tile.tile, lv_color_hex(color), 0);
-    const uint32_t labels = (color == COLOR_PANEL) ? COLOR_DIM : COLOR_TEXT;
-    lv_obj_set_style_text_color(tile.title, lv_color_hex(labels), 0);
-    lv_obj_set_style_text_color(tile.unit, lv_color_hex(labels), 0);
-}
-
-// Heart rate zones (Config.h): Z1 Recovery ... Z5 Anaerobic, colours of the Garmin zones
-struct hr_zone_t { int min; const char *name; uint32_t color; };
-static const hr_zone_t HR_ZONES[] = {
-    {HR_Z1_MIN, "Z1 Recovery",  GARMIN_GREY},
-    {HR_Z2_MIN, "Z2 Endurance", GARMIN_BLUE},
-    {HR_Z3_MIN, "Z3 Tempo",     GARMIN_GREEN},
-    {HR_Z4_MIN, "Z4 Threshold", GARMIN_ORANGE},
-    {HR_Z5_MIN, "Z5 Anaerobic", GARMIN_RED},
-};
-
-static const hr_zone_t *hr_zone(int bpm)
-{
-    const hr_zone_t *zone = nullptr;
-    for (const hr_zone_t &z : HR_ZONES) {
-        if (bpm >= z.min) zone = &z;
+    if (v < scale.min[0]) return -1;
+    if (v > scale.max) return ZONE_COUNT;
+    int zone = 0;
+    for (int z = 0; z < ZONE_COUNT; z++) {
+        if (v >= scale.min[z]) zone = z;
     }
-    return zone;   // nullptr: below Z1
+    return zone;
+}
+
+static lv_obj_t *make_band(lv_obj_t *parent, int x, int y, int a0, int a1, uint32_t color, bool rounded)
+{
+    lv_obj_t *arc = lv_arc_create(parent);
+    lv_obj_remove_style_all(arc);   // No knob, no indicator, no padding: only the background arc (the band)
+    lv_obj_set_clickable(arc, false);
+    lv_obj_set_size(arc, GAUGE_SIZE, GAUGE_SIZE);
+    lv_obj_set_pos(arc, x, y);
+    lv_arc_set_bg_angles(arc, a0 % 360, a1 % 360);
+    lv_obj_set_style_arc_width(arc, GAUGE_ARC_W, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(arc, lv_color_hex(color), LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(arc, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_arc_rounded(arc, rounded, LV_PART_MAIN);
+    return arc;
+}
+
+static gauge_t make_gauge(lv_obj_t *parent, int x, const gauge_scale_t *scale, const char *unit, const char *caption,
+                          bool heart)
+{
+    gauge_t g = {};
+    g.scale = scale;
+    g.cx = x + GAUGE_SIZE / 2;
+    g.cy = GAUGE_Y + GAUGE_SIZE / 2;
+
+    // Bands, as wide as the span of their values. Only the two ends of the gauge are rounded: the last band is drawn
+    // first and each band covers the round cap of the previous one.
+    int angle[ZONE_COUNT + 1];
+    for (int z = 0; z < ZONE_COUNT; z++) angle[z] = gauge_angle(*scale, (float)scale->min[z]);
+    angle[ZONE_COUNT] = GAUGE_START + GAUGE_SWEEP;
+    make_band(parent, x, GAUGE_Y, angle[ZONE_COUNT - 1], angle[ZONE_COUNT], scale->color[ZONE_COUNT - 1], true);
+    for (int z = 0; z < ZONE_COUNT - 1; z++) {
+        make_band(parent, x, GAUGE_Y, angle[z], angle[z + 1], scale->color[z], z == 0);
+    }
+
+    // Marker: disc in the colour of the zone, black ring to detach it from the band
+    g.marker = lv_obj_create(parent);
+    lv_obj_remove_style_all(g.marker);
+    lv_obj_set_clickable(g.marker, false);
+    lv_obj_set_size(g.marker, MARKER_SIZE, MARKER_SIZE);
+    lv_obj_set_style_radius(g.marker, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(g.marker, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(g.marker, 3, 0);
+    lv_obj_set_style_border_color(g.marker, lv_color_hex(COLOR_BG), 0);
+    lv_obj_set_hidden(g.marker, true);
+    g.marker_angle = -1;
+
+    g.value = make_label(parent, &lv_font_montserrat_48, COLOR_TEXT, "--");
+    lv_obj_align(g.value, LV_ALIGN_CENTER, g.cx - SCREEN_WIDTH / 2, g.cy + 4 - SCREEN_HEIGHT / 2);
+    g.unit = make_label(parent, &lv_font_montserrat_16, COLOR_DIM, unit);
+    lv_obj_align(g.unit, LV_ALIGN_CENTER, g.cx - SCREEN_WIDTH / 2, g.cy + 38 - SCREEN_HEIGHT / 2);
+    g.caption = make_label(parent, &lv_font_montserrat_20, COLOR_TEXT, caption);
+    lv_obj_align(g.caption, LV_ALIGN_TOP_MID, g.cx - SCREEN_WIDTH / 2, 284);
+
+    if (heart) {
+        lv_obj_t *img = lv_image_create(parent);
+        lv_image_set_src(img, &s_heart_dsc);
+        lv_obj_set_style_image_recolor(img, lv_color_hex(COLOR_TEXT), 0);
+        lv_obj_set_style_image_recolor_opa(img, LV_OPA_COVER, 0);
+        lv_obj_align(img, LV_ALIGN_CENTER, g.cx - SCREEN_WIDTH / 2, g.cy - 34 - SCREEN_HEIGHT / 2);
+    }
+    return g;
+}
+
+// Value shown on a gauge (NAN: no value): text, marker on the arc in the colour of the zone
+static void gauge_set(gauge_t &g, float v, const char *text)
+{
+    set_text(g.value, text);
+    int angle = -1;
+    uint32_t color = 0;
+    if (!isnan(v)) {
+        angle = gauge_angle(*g.scale, v);
+        const int zone = gauge_zone(*g.scale, v);
+        color = g.scale->color[zone < 0 ? 0 : zone >= ZONE_COUNT ? ZONE_COUNT - 1 : zone];
+    }
+    if (angle != g.marker_angle) {
+        if (angle < 0) {
+            lv_obj_set_hidden(g.marker, true);
+        } else {
+            const float r = (GAUGE_SIZE - GAUGE_ARC_W) / 2.0f;
+            const float rad = angle * (float)M_PI / 180.0f;
+            lv_obj_set_pos(g.marker, g.cx + (int)lroundf(r * cosf(rad)) - MARKER_SIZE / 2,
+                           g.cy + (int)lroundf(r * sinf(rad)) - MARKER_SIZE / 2);
+            if (g.marker_angle < 0) lv_obj_set_hidden(g.marker, false);
+        }
+        g.marker_angle = angle;
+    }
+    if (angle >= 0 && color != g.marker_color) {
+        g.marker_color = color;
+        lv_obj_set_style_bg_color(g.marker, lv_color_hex(color), 0);
+    }
+}
+
+// Centre column: title, value, unit
+static value_box_t make_value_box(lv_obj_t *parent, int y, const char *title, const char *unit)
+{
+    const int cx = SCREEN_WIDTH / 2;
+    lv_obj_t *t = make_label(parent, &lv_font_montserrat_16, COLOR_DIM, title);
+    lv_obj_align(t, LV_ALIGN_TOP_MID, cx - SCREEN_WIDTH / 2, y);
+    value_box_t box = {};
+    box.value = make_label(parent, &lv_font_montserrat_36, COLOR_TEXT, "--");
+    lv_obj_align(box.value, LV_ALIGN_TOP_MID, cx - SCREEN_WIDTH / 2, y + 20);
+    lv_obj_t *u = make_label(parent, &lv_font_montserrat_14, COLOR_DIM, unit);
+    lv_obj_align(u, LV_ALIGN_TOP_MID, cx - SCREEN_WIDTH / 2, y + 60);
+    return box;
+}
+
+static lv_obj_t *make_line(lv_obj_t *parent, int x, int y, int w)
+{
+    lv_obj_t *line = lv_obj_create(parent);
+    lv_obj_remove_style_all(line);
+    lv_obj_set_clickable(line, false);
+    lv_obj_set_size(line, w, 1);
+    lv_obj_set_pos(line, x, y);
+    lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(line, lv_color_hex(COLOR_LINE), 0);
+    return line;
 }
 
 static void refresh_cb(lv_timer_t *timer)
@@ -254,37 +386,31 @@ static void refresh_cb(lv_timer_t *timer)
     if (ftms_fresh && b.ic4_data.power_present) snprintf(text, sizeof(text), "%d", b.ic4_data.power_w);
     else snprintf(text, sizeof(text), "--");
     set_text(s_power.value, text);
-    if (ftms_fresh && b.ic4_data.cadence_present) snprintf(text, sizeof(text), "%.0f", b.ic4_data.cadence_rpm);
-    else snprintf(text, sizeof(text), "--");
-    set_text(s_cadence.value, text);
-    // Target cadence: tile highlighted in green
-    const bool cadence_target = ftms_fresh && b.ic4_data.cadence_present &&
-                                b.ic4_data.cadence_rpm >= CADENCE_TARGET_MIN && b.ic4_data.cadence_rpm <= CADENCE_TARGET_MAX;
-    set_tile_bg(s_cadence, cadence_target ? GARMIN_GREEN : COLOR_PANEL);
-    set_text(s_cadence.unit, cadence_target ? "rpm - target" : "rpm");
+    if (ftms_fresh && b.ic4_data.cadence_present) {
+        snprintf(text, sizeof(text), "%.0f", b.ic4_data.cadence_rpm);
+        gauge_set(s_cadence_gauge, b.ic4_data.cadence_rpm, text);
+    } else {
+        gauge_set(s_cadence_gauge, NAN, "--");
+    }
 
-    // Distance of the session, from the IC4 speed (4 characters: fits the tile)
+    // Distance of the session, from the IC4 speed (4 characters: fits the centre column)
     const float km = b.distance_km;
     snprintf(text, sizeof(text), km < 10 ? "%.2f" : km < 100 ? "%.1f" : "%.0f", km);
     set_text(s_distance.value, text);
 
-    // Heart rate: HRM 600. The IC4 only receives it: its frames are never used for this tile.
+    // Heart rate: HRM 600. The IC4 only receives it: its frames are never used for this gauge.
     if (hr_valid) {
         const int bpm = b.hr_bpm;
         snprintf(text, sizeof(text), "%d", bpm);
-        set_text(s_heart.value, text);
-        const hr_zone_t *zone = hr_zone(bpm);
-        if (zone != nullptr && bpm <= HR_Z5_MAX) {
-            set_text(s_heart.unit, zone->name);
-            set_tile_bg(s_heart, zone->color);
-        } else {
-            set_text(s_heart.unit, zone != nullptr ? "Above Z5" : "Below Z1");
-            set_tile_bg(s_heart, zone != nullptr ? GARMIN_RED : COLOR_PANEL);
-        }
+        gauge_set(s_hr_gauge, (float)bpm, text);
+        const int zone = gauge_zone(HR_SCALE, (float)bpm);
+        if (zone < 0) snprintf(text, sizeof(text), "Below zone 1");
+        else if (zone >= ZONE_COUNT) snprintf(text, sizeof(text), "Above zone 5");
+        else snprintf(text, sizeof(text), "Zone %d", zone + 1);
+        set_text(s_hr_gauge.caption, text);
     } else {
-        set_text(s_heart.value, "--");
-        set_text(s_heart.unit, "bpm");
-        set_tile_bg(s_heart, COLOR_PANEL);
+        gauge_set(s_hr_gauge, NAN, "--");
+        set_text(s_hr_gauge.caption, "Heart rate");
     }
 }
 
@@ -399,25 +525,29 @@ void BridgeScreen_create(void)
     lv_obj_set_style_text_color(scr, lv_color_hex(COLOR_TEXT), 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
-    lv_obj_t *title = lv_label_create(scr);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-    lv_label_set_text(title, BRIDGE_NAME);
-    lv_obj_set_pos(title, 12, 8);
+    s_heart_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    s_heart_dsc.header.cf = LV_COLOR_FORMAT_A8;
+    s_heart_dsc.header.w = HEART_W;
+    s_heart_dsc.header.h = HEART_H;
+    s_heart_dsc.header.stride = HEART_W;
+    s_heart_dsc.data_size = sizeof(HEART_A8);
+    s_heart_dsc.data = HEART_A8;
 
-    s_clock = lv_label_create(scr);
-    lv_obj_set_style_text_font(s_clock, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(s_clock, lv_color_hex(COLOR_TEXT), 0);
-    lv_label_set_text(s_clock, "");
+    s_clock = make_label(scr, &lv_font_montserrat_26, COLOR_TEXT, "");
     lv_obj_align(s_clock, LV_ALIGN_TOP_RIGHT, -12, 8);
 
-    s_ic4 = make_row(scr, 52, "IC4");
-    s_fenix = make_row(scr, 92, "Fenix");
-    s_hrm = make_row(scr, 132, "HRM 600");
+    // The IC4 state is shorter: the clock is on its right
+    s_ic4 = make_row(scr, 8, "IC4", 240);
+    s_fenix = make_row(scr, 38, "Fenix", SCREEN_WIDTH - 150 - 8);
+    s_hrm = make_row(scr, 68, "HRM 600", SCREEN_WIDTH - 150 - 8);
+    make_line(scr, 0, 102, SCREEN_WIDTH);
 
-    s_power = make_tile(scr, TILE_GAP, "Power", "W");
-    s_cadence = make_tile(scr, TILE_GAP + (TILE_W + TILE_GAP), "Cadence", "rpm");
-    s_distance = make_tile(scr, TILE_GAP + 2 * (TILE_W + TILE_GAP), "Distance", "km");
-    s_heart = make_tile(scr, TILE_GAP + 3 * (TILE_W + TILE_GAP), "Heart rate", "bpm");
+    s_hr_gauge = make_gauge(scr, GAUGE_MARGIN, &HR_SCALE, "bpm", "Heart rate", true);
+    s_cadence_gauge = make_gauge(scr, SCREEN_WIDTH - GAUGE_MARGIN - GAUGE_SIZE, &CADENCE_SCALE, "rpm", "Cadence",
+                                 false);
+    s_power = make_value_box(scr, 126, "Power", "W");
+    make_line(scr, SCREEN_WIDTH / 2 - 40, 208, 80);
+    s_distance = make_value_box(scr, 220, "Distance", "km");
 
     // Details page, shown by touching the screen
     s_main_scr = scr;
